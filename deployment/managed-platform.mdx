@@ -1,0 +1,180 @@
+---
+title: "Deploy Cue to Railway, Fly.io, or Render"
+sidebarTitle: "Managed Platform"
+description: "Get Cue running on a managed platform in minutes — HTTPS included, Postgres add-on available, no server to patch. Works with Railway, Fly.io, and paid Render."
+---
+
+Managed platforms are the fastest path from zero to a live Cue instance. You connect a repository, set some environment variables, attach a Postgres add-on, and the platform handles certificates, restarts, and scaling. There is no server to patch, no certbot cron job, and no firewall to configure. The whole setup takes under thirty minutes on any of the three platforms covered here.
+
+<Warning>
+  **Free tiers that sleep the process will silently never send reminders.** The reminder worker polls every 20 seconds and the entire push-notification pipeline depends on that loop running without interruption. Any plan that suspends or idles the process when nobody is browsing — common on free tiers — will serve the web app perfectly and deliver no reminders at all. Pick a paid or "always-on" plan. The easiest test: book something five minutes out, close the tab, and wait.
+</Warning>
+
+## Why managed
+
+<CardGroup cols={3}>
+  <Card title="HTTPS included" icon="lock">
+    TLS certificates are provisioned and renewed automatically. Push notifications, geolocation, voice notes, and the PWA install prompt all require a secure origin — you get that for free.
+  </Card>
+  <Card title="No server to patch" icon="shield-check">
+    OS updates, kernel patches, and runtime upgrades are the platform's problem. You ship code; they keep the machine running.
+  </Card>
+  <Card title="One-click Postgres" icon="database">
+    Every major managed platform offers a Postgres add-on that injects `DATABASE_URL` automatically. No separate provisioning step.
+  </Card>
+</CardGroup>
+
+## Build settings
+
+Every managed platform has a place to configure install, build, and start commands. Use these values exactly:
+
+| Setting | Value |
+|---------|-------|
+| Install | `npm ci --include=dev` |
+| Build | `npm run build` |
+| Start | `npm start -w @cue/api` |
+
+<Warning>
+  **`--include=dev` is not optional.** Managed platforms set `NODE_ENV=production`, which causes a plain `npm ci` to skip devDependencies. Vite lives in devDependencies — omitting it means the build fails before it produces a single file. Always pass `--include=dev` for the install step.
+</Warning>
+
+## Deployment steps
+
+<Steps>
+  <Step title="Create a new project and attach Postgres">
+    On your chosen platform, create a new project from your Cue repository. Then add a PostgreSQL add-on or plugin. The platform will inject `DATABASE_URL` into your environment automatically — confirm it appears in your environment variables dashboard before continuing.
+
+    <Tip>
+      Railway, Fly.io, and paid Render all support one-click Postgres. Free Render instances sleep; use a paid instance or a different platform if you need continuous uptime.
+    </Tip>
+  </Step>
+
+  <Step title="Set the build and start commands">
+    In your project's build settings, enter the values from the table above:
+
+    | Setting | Value |
+    |---------|-------|
+    | Install | `npm ci --include=dev` |
+    | Build | `npm run build` |
+    | Start | `npm start -w @cue/api` |
+  </Step>
+
+  <Step title="Generate VAPID keys">
+    Push notifications require a VAPID key pair. Clone the repository locally, then run:
+
+    ```bash
+    npm run vapid
+    ```
+
+    This prints a public key and a private key. Copy both — you will paste them into your environment variables in the next step. These keys are self-signed; there is no service to register with and nothing to pay. **Generate them once and keep the same pair** — changing either key later invalidates every existing browser subscription.
+  </Step>
+
+  <Step title="Set environment variables">
+    In your platform's environment variables panel, set the following. Required values are marked — the others are optional features you can enable later.
+
+    **Required**
+
+    | Variable | Value |
+    |----------|-------|
+    | `DATABASE_URL` | Injected by the Postgres add-on. For managed databases (RDS, Neon, Supabase) append `?sslmode=require` — without it the driver connects unencrypted and RDS refuses the connection. |
+    | `JWT_SECRET` | Any long random string. Generate one with `openssl rand -hex 32`. Changing it signs everyone out. |
+    | `VAPID_PUBLIC_KEY` | From `npm run vapid` (step 3). |
+    | `VAPID_PRIVATE_KEY` | From `npm run vapid` (step 3). |
+    | `VAPID_SUBJECT` | A `mailto:` or `https:` URL. Push services use it to contact you if your server misbehaves. |
+    | `WEB_ORIGIN` | Your real URL, e.g. `https://cue.example.com`. Must match exactly — scheme, host, and port. Used for the CORS allow-list. |
+
+    **Critical: leave this blank**
+
+    | Variable | Value |
+    |----------|-------|
+    | `VITE_API_URL` | **Must be blank in production.** In production the API serves the built web app from the same origin, so the browser calls a relative `/api`. Setting this to a development value sends every OAuth consent screen back to `localhost`, which breaks calendar integrations even if the redirect URI is registered correctly. |
+
+    **Optional but recommended**
+
+    | Variable | Notes |
+    |----------|-------|
+    | `ENCRYPTION_KEY` | Required to store AI provider keys and Google/Microsoft OAuth tokens encrypted at rest. Generate with `openssl rand -hex 32`. Without it, AI paragraph import and calendar OAuth are unavailable. |
+    | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Required for password-reset emails. Without `SMTP_HOST` the reset route refuses outright rather than claiming to have sent a message it could not. Any SMTP service works (SES, Mailgun, Postmark). |
+    | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Free OAuth client from Google Cloud console. Enables one-click Google Calendar connection. Not a billed API key. |
+    | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | Free app registration from Azure portal. Enables Microsoft/Outlook calendar connection. Not a billed API key. |
+    | `GOOGLE_PLACES_API_KEY` | Enables higher-quality business lookup by location. Without it, Cue falls back to OpenStreetMap (free, no key needed). |
+    | `HOST` | Set to `127.0.0.1` in production so the process is not reachable directly — only the platform's proxy faces the internet. |
+    | `PORT` | Defaults to `3002`. Most managed platforms inject their own `PORT`; leave this unset unless the platform requires it. |
+    | `REMINDER_POLL_MS` | Defaults to `20000` (20 seconds). How often the worker checks for due reminders. |
+    | `ESCALATION_MINUTES` | Defaults to `15`. Gap between reminder escalations. |
+    | `MAX_ESCALATIONS` | Defaults to `4`. How many times to chase before the chain stops buzzing. |
+    | `TRAVEL_SPEED_KMH` | Defaults to `45`. Average speed used for travel-time conflict estimates. |
+    | `PLACE_LOOKUP_PROVIDER` | `auto` (default), `osm`, `google`, or `none`. |
+    | `ANTHROPIC_API_KEY` | Cue's own key for reading ambiguous capture lines. Empty turns it off. |
+
+    <Note>
+      For managed databases (RDS, Neon, Supabase), your `DATABASE_URL` must include `?sslmode=require`. Use `require` rather than `verify-full` unless you have also installed the provider's CA bundle — `verify-full` checks the certificate chain and fails without it.
+
+      ```
+      postgres://cue:password@your-db.ap-south-1.rds.amazonaws.com:5432/cue?sslmode=require
+      ```
+    </Note>
+  </Step>
+
+  <Step title="Run migrations (first deploy only)">
+    After your first successful build, open the platform's shell or one-off task runner and run:
+
+    ```bash
+    CUE_NEW_DATABASE=1 npm run db:migrate
+    ```
+
+    <Warning>
+      **`CUE_NEW_DATABASE=1` is for the first run only.** A brand-new database and one whose tables have been deleted look identical to the migration runner. Without this flag, migrations refuse to run on a database with no migration history, to avoid accidentally wiping a live database. Set it once for the initial setup; **never set it on subsequent deploys**.
+    </Warning>
+
+    Every deploy after the first runs `npm run db:migrate` without the flag — migrations are forward-only and each file runs exactly once, so re-running is always safe.
+  </Step>
+
+  <Step title="Trigger a deploy and verify">
+    Push a commit or trigger a manual deploy. Once the build completes, verify the service is healthy:
+
+    ```bash
+    curl https://your-domain/health
+    ```
+
+    A healthy response looks like:
+
+    ```json
+    {"ok":true,"push":true}
+    ```
+
+    If `push` is `false`, the VAPID keys were not picked up — double-check `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY` in your environment variables.
+
+    <Tip>
+      To confirm the reminder worker is actually running (not just the HTTP server), book something five minutes out, close the browser tab entirely, and wait. If the notification arrives with the tab closed, the whole delivery path is working.
+    </Tip>
+  </Step>
+
+  <Step title="Install on your phone">
+    Open the site in Chrome on Android and tap **Add to Home Screen**. On iPhone, use Safari → Share → **Add to Home Screen** (requires iOS 16.4+).
+
+    <Warning>
+      **On iPhone, adding to the home screen is required before notifications work.** Safari exposes no push API to a normal browser tab. The in-app install prompt explains this and shows the exact two taps to make.
+    </Warning>
+  </Step>
+</Steps>
+
+## Why HTTPS is not optional
+
+Managed platforms provide TLS automatically, but it is worth understanding what depends on it. Four features silently stop working on plain `http`:
+
+| Feature | Why HTTPS is required |
+|---------|----------------------|
+| Install as an app (PWA) | Service workers only register on a secure origin |
+| Push reminders | Same requirement as service workers |
+| Location and nearby wishes | Geolocation API requires a secure origin |
+| Voice notes | `getUserMedia` requires a secure origin |
+
+`localhost` is exempt from this rule, which is why local development works without a certificate. A bare IP address is not exempt.
+
+## Post-deploy checklist
+
+- `curl https://your-domain/health` returns `{"ok":true,"push":true}`
+- Register an account, enable notifications, and tap **Send test** — the test notification should arrive with the tab closed
+- Book something five minutes out and verify the reminder fires
+- If using Google Calendar: confirm the OAuth redirect URI registered in Google Cloud matches your production domain exactly (`https://your-domain/api/oauth/google/callback`)

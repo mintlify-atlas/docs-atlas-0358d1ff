@@ -1,0 +1,212 @@
+---
+title: "Trips API — Journey Containers and Travel Planning"
+sidebarTitle: "Trips"
+description: "CRUD for trips — multi-day journey containers that surface saved intentions, assemble bookings, and trigger travel conflict checks when plans overlap."
+---
+
+A trip is a period with a place attached — not a thing to do, but a context. "I am in Mathura from 12–14 October" changes what is feasible for three days, makes a pile of saved intentions suddenly relevant, and is the strongest indicator of a spoken-for day that Cue knows about. Trips are shown on calendar grids alongside commitments so the grid never lies about what a day holds.
+
+Intentions are the counterpart to trips: dateless wishes for a place that wait invisibly until a trip to that destination is created, at which point they surface for you to schedule.
+
+## Endpoints
+
+### `GET /api/trips`
+
+Returns all trips for the authenticated user, ordered by start date ascending. Each trip includes counts of planned commitments and waiting intentions.
+
+**Response** — array of `TripDTO`:
+
+<ResponseField name="id" type="string">UUID.</ResponseField>
+<ResponseField name="placeLabel" type="string">Free-text destination name.</ResponseField>
+<ResponseField name="placeId" type="string | null">UUID of a saved place, if linked.</ResponseField>
+<ResponseField name="startsOn" type="string">`YYYY-MM-DD`.</ResponseField>
+<ResponseField name="endsOn" type="string">`YYYY-MM-DD`.</ResponseField>
+<ResponseField name="strictness" type="string">One of `strict`, `flexible`, `tentative` — drives conflict severity.</ResponseField>
+<ResponseField name="notes" type="string | null">Free-text notes.</ResponseField>
+<ResponseField name="status" type="string">`planned` or `cancelled`.</ResponseField>
+<ResponseField name="daysUntil" type="number">Whole days from today; negative once the trip has started.</ResponseField>
+<ResponseField name="nights" type="number">Number of nights.</ResponseField>
+<ResponseField name="plannedCount" type="number">Open commitments linked to this trip.</ResponseField>
+<ResponseField name="waitingCount" type="number">Saved intentions for this destination.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+
+---
+
+### `GET /api/trips/:id`
+
+Returns a trip with its full day-by-day plan and any waiting intentions.
+
+**Response**
+
+<ResponseField name="trip" type="TripDTO">The trip record.</ResponseField>
+<ResponseField name="planned" type="TripItemDTO[]">
+  All non-deleted commitments linked to this trip, ordered by `dueAt`. Each item includes booking details (type, reference, departure city, leave-by time), checklist progress, and all standard commitment fields.
+</ResponseField>
+<ResponseField name="waiting" type="IntentionDTO[]">
+  Saved intentions for this trip's destination that are not yet scheduled.
+</ResponseField>
+
+---
+
+### `POST /api/trips`
+
+Creates a new trip. The response includes any waiting intentions for the destination — that surfacing is the whole point of storing them without a date.
+
+**Request body**
+
+<ParamField body="placeLabel" type="string" required>
+  Destination name. 1–200 characters. Free text — you plan a trip to "Mathura" before it is a saved place.
+</ParamField>
+
+<ParamField body="placeId" type="string">
+  UUID of a saved place, if you want to link to one.
+</ParamField>
+
+<ParamField body="startsOn" type="string" required>
+  `YYYY-MM-DD` — trip start date.
+</ParamField>
+
+<ParamField body="endsOn" type="string" required>
+  `YYYY-MM-DD` — must be on or after `startsOn`.
+</ParamField>
+
+<ParamField body="strictness" type="string" default="flexible">
+  How confirmed this trip is. Drives how loud a conflict with another plan sounds.
+  - `strict` → conflict is `impractical`
+  - `flexible` → conflict is `tight`
+  - `tentative` → conflict is `worth a look`
+</ParamField>
+
+<ParamField body="notes" type="string">
+  Free-text notes. Up to 4000 characters.
+</ParamField>
+
+**Response** — `201`:
+
+```json
+{
+  "trip": { "id": "...", "placeLabel": "Mathura", "startsOn": "2026-10-12", "endsOn": "2026-10-14", ... },
+  "waiting": [
+    { "id": "...", "title": "Buy peda at Banke Bihari", "placeLabel": "Mathura", "status": "saved" }
+  ]
+}
+```
+
+**Error codes:** `400 ends_before_it_starts`
+
+<CodeGroup>
+```bash create-trip
+curl -X POST http://localhost:3002/api/trips \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "placeLabel": "Mathura",
+    "startsOn": "2026-10-12",
+    "endsOn": "2026-10-14",
+    "strictness": "strict",
+    "notes": "Diwali trip"
+  }'
+```
+</CodeGroup>
+
+---
+
+### `PATCH /api/trips/:id`
+
+Updates a trip. All fields from the create body are accepted, all optional.
+
+**Response** — the updated `TripDTO`.
+
+**Error codes:** `400 ends_before_it_starts`, `404 not_found`.
+
+---
+
+### `DELETE /api/trips/:id`
+
+Deletes the trip and **detaches** (does not delete) its linked commitments. Cancelling a journey does not cancel the dentist appointment you happened to file under it — the database enforces this with `ON DELETE SET NULL`.
+
+**Response**
+
+```json
+{ "ok": true, "detached": 3 }
+```
+
+Where `detached` is the number of commitments that were unlinked.
+
+---
+
+### `POST /api/trips/:id/packing`
+
+Generates a packing list for the trip as a new commitment with a checklist. The list is tailored to the trip's length, modes of transport (flight, train, bus), and purpose (work or leisure). Created once — asking again returns the same plan.
+
+**Request body**
+
+<ParamField body="purpose" type="string" required>
+  One of `work`, `leisure`.
+</ParamField>
+
+**Response**
+
+```json
+{ "id": "...", "created": true, "items": 18 }
+```
+
+---
+
+## Intentions
+
+### `GET /api/intentions`
+
+Returns all saved intentions (dateless wishes) for the authenticated user.
+
+**Response** — array of `IntentionDTO`:
+
+<ResponseField name="id" type="string">UUID.</ResponseField>
+<ResponseField name="placeLabel" type="string | null">Destination; `null` for a wish with no place.</ResponseField>
+<ResponseField name="title" type="string">What to do.</ResponseField>
+<ResponseField name="status" type="string">One of `saved`, `scheduled`, `done`, `dropped`.</ResponseField>
+<ResponseField name="priority" type="string">One of `critical`, `high`, `normal`, `low`, `nice_to_have`.</ResponseField>
+<ResponseField name="durationMinutes" type="number">Expected duration when scheduled.</ResponseField>
+<ResponseField name="commitmentId" type="string | null">Set when this wish has been turned into a real plan.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+
+---
+
+### `POST /api/intentions`
+
+Creates a dateless intention (wish) for a place.
+
+**Request body**
+
+<ParamField body="title" type="string" required>What to do. 1–300 characters.</ParamField>
+<ParamField body="placeLabel" type="string">Where — e.g. `"Jaipur"`. Null for a general wish.</ParamField>
+<ParamField body="placeId" type="string">UUID of a saved place.</ParamField>
+<ParamField body="notes" type="string">Notes. Up to 4000 characters.</ParamField>
+<ParamField body="preferredWindow" type="string">One of `morning`, `afternoon`, `evening`, `night`.</ParamField>
+<ParamField body="durationMinutes" type="number" default="60">Expected duration when scheduled.</ParamField>
+<ParamField body="priority" type="string" default="nice_to_have">One of `critical`, `high`, `normal`, `low`, `nice_to_have`.</ParamField>
+
+**Response** — `201` with the created `IntentionDTO`.
+
+<CodeGroup>
+```bash create-intention
+curl -X POST http://localhost:3002/api/intentions \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "title": "Buy peda at Banke Bihari", "placeLabel": "Mathura" }'
+```
+</CodeGroup>
+
+---
+
+## Trip strictness and conflict severity
+
+When a plan overlaps a trip or requires travel between two different places, Cue checks for location conflicts. The severity depends on the trip's `strictness`:
+
+| Strictness | Conflict severity | Meaning |
+|---|---|---|
+| `strict` | `impossible` | You will be there the whole time; an out-of-city plan during those days is impractical. |
+| `flexible` | `tight` | Mostly there; day trips are possible but it will be tight. |
+| `tentative` | `review` | You expect to be there; worth a look before committing. |
+
+Location conflicts are advisory — they never block a save. They appear in the `locationConflicts` array of the conflict check response alongside time-based `conflicts`.

@@ -1,0 +1,261 @@
+---
+title: "Recurring Plans — Rules Stored, Real Rows Written"
+sidebarTitle: "Recurring Plans"
+description: "Cue converts recurrence rules into real calendar rows in a rolling 120-day window — the reminder engine, conflict detection, and editing work with no changes."
+---
+
+Say it once: `standup every tuesday at 10am`. From that point forward, Cue writes real commitment rows for every upcoming occurrence — the rule is stored, but the calendar fills with actual entries rather than virtual, expand-on-read placeholders. This design choice makes the rest of the app oblivious to recurrence entirely.
+
+## Why real rows instead of virtual expansion
+
+<CardGroup cols={2}>
+  <Card title="Reminder engine" icon="bell">
+    The nag worker queues reminders against real database rows. A virtual occurrence has nothing to queue against — it does not exist until someone asks for it, and the worker runs on a timer with nobody asking.
+  </Card>
+  <Card title="Conflict detection" icon="triangle-exclamation">
+    Clash checking is a query over the `commitments` table. Virtual occurrences are invisible to it, so a recurring standup would never block anything from booking on top of it.
+  </Card>
+  <Card title="Today screen" icon="calendar-day">
+    The Today view reads real rows. A recurring item that has no row yet simply does not appear — which is the failure mode this design eliminates.
+  </Card>
+  <Card title="Editing" icon="pen">
+    Every edit path works against a real row with a real ID. "Change just this one" has a row to mark detached. Moving an occurrence a few minutes is a normal commitment edit.
+  </Card>
+</CardGroup>
+
+## The rolling 120-day window
+
+Cue does not write a thousand rows when you create an unbounded weekly rule. Instead, a sweep runs hourly and tops up every active series to a 120-day horizon. Only series whose materialised-to date is running out (within 30 days) are touched.
+
+<Note>
+  Generation is idempotent. A unique index on `(recurrence_id, occurrence_on)` means running the sweep twice — or running two API instances simultaneously — inserts nothing on the second pass. You cannot get duplicate occurrences.
+</Note>
+
+When you first create a series, Cue materialises immediately rather than waiting for the next sweep. The calendar fills before you look away from the creation screen.
+
+## Supported patterns
+
+The parser (`parseRecurrence.ts`) is deterministic: same input, same output, every time, no AI involved. It returns `null` on anything it is not sure about rather than guessing.
+
+<Accordion title="Weekly patterns">
+
+| Phrase | What it creates |
+|--------|----------------|
+| `standup every tuesday at 10am` | Weekly, Tuesdays, 10:00 |
+| `gym on mondays and thursdays` | Weekly, Monday + Thursday (plural implies repeat) |
+| `every other friday` | Weekly, interval 2 |
+| `team sync every other friday until 15 December` | Weekly, interval 2, ends 15 Dec |
+| `physio every tuesday 6 times` | Weekly, Tuesdays, count 6 |
+| `every weekday` / `every working day` | Weekly, Mon–Fri |
+
+</Accordion>
+
+<Accordion title="Monthly patterns">
+
+| Phrase | What it creates |
+|--------|----------------|
+| `pay the rent on the last day of every month` | Monthly, day 31 (clamped — see below) |
+| `book club on the second tuesday of every month` | Monthly, second Tuesday (`setPos: 2`) |
+| `on the 15th of each month` | Monthly, day 15 |
+| `every month on the 5th` | Monthly, day 5 |
+
+</Accordion>
+
+<Accordion title="Daily and other patterns">
+
+| Phrase | What it creates |
+|--------|----------------|
+| `daily standup` | Daily, interval 1 |
+| `every 3 days` | Daily, interval 3 |
+| `fortnightly` / `bi-weekly` | Weekly, interval 2 |
+| `quarterly` | Monthly, interval 3 |
+| `every year on 3 March` | Yearly, March 3 |
+
+</Accordion>
+
+## Ambiguity: "every second Tuesday"
+
+The phrase "every second Tuesday" has two valid readings that agree for about a month and then permanently diverge:
+
+- **"Every other Tuesday"** — fortnightly, anchored to the start date
+- **"Second Tuesday of the month"** — the calendar month position, which shifts around
+
+Cue resolves this by grammar: `every second tuesday of the month` is read as the monthly position rule (`setPos: 2`). `every other tuesday` is read as the fortnightly rule (`interval: 2`). The `of the month` qualifier is what distinguishes them — without it, fortnightly is assumed.
+
+## Short month handling
+
+RFC 5545 says that a rule firing on the 31st simply skips February, April, June, September, and November. Cue disagrees: a month with no rent reminder at all is a worse outcome than a reminder that lands on the 28th.
+
+**Rule:** dates beyond the real month-end clamp backwards to the last real day. The 31st fires on February 28 (or 29 in a leap year), on April 30, and so on. The 31st is also how "last day of every month" is stored — it always clamps to wherever the month actually ends.
+
+## "Change just this one"
+
+Editing a single occurrence from a series marks that commitment row as `detached: true`. The regeneration sweep that runs after a series edit leaves detached rows completely alone.
+
+```
+series rule changes  →  future pending non-detached rows deleted  →  regenerated from new rule
+                                                                    ↳  detached rows untouched
+```
+
+This means your one-off "move Monday's standup to Tuesday because of a holiday" survives the next time you change the series start time or title.
+
+## Stopping a series
+
+When you delete a recurring series, Cue:
+
+1. Deletes all **future, pending, non-detached** occurrences
+2. Marks the series `status: 'ended'`
+3. Leaves completed, cancelled, or detached occurrences exactly as they are
+
+Someone who attended eight classes still has eight attendances in their history. Stopping the series does not erase the record of what happened.
+
+## What Today shows
+
+The Coming-up list collapses a series to its **next single occurrence** and marks it with `· repeats`. Seventeen standup rows do not appear — just the next one.
+
+The full series, all its occurrences, their statuses, and which ones are detached lives on the **Repeating** screen.
+
+## Rejected patterns
+
+Cue refuses patterns it cannot represent faithfully rather than importing something close but wrong:
+
+<Warning>
+  The following patterns are rejected outright:
+
+  - **`take medicine every 8 hours`** — sub-daily frequency is not modelled. A rule that holds one time-of-day field cannot represent three daily firings without silently dropping two of them.
+  - **`every 1st and 15th of the month`** — the rule shape holds one `byMonthDay` value. Accepting the phrase and quietly ignoring the 1st (or the 15th) is the exact failure mode the parser exists to prevent.
+  - **`relativeYearly` from Microsoft** — "the first Monday of May every year" requires `setPos` on a yearly rule, which is not in Cue's model. It is refused and reported rather than imported as something that looks right on one date and is wrong on most others.
+
+  A wrong repeat is far worse than none — it quietly fills your calendar with the wrong thing.
+</Warning>
+
+## API
+
+<CodeGroup>
+
+```bash List recurring plans
+GET /api/recurrences
+Authorization: Bearer <token>
+```
+
+```bash Create a recurring plan
+POST /api/recurrences
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "title": "Team standup",
+  "kind": "meeting",
+  "durationMinutes": 30,
+  "hour": 10,
+  "minute": 0,
+  "startsOn": "2025-01-06",
+  "rule": {
+    "freq": "weekly",
+    "interval": 1,
+    "byWeekday": [2]
+  }
+}
+```
+
+```bash Edit the series (rebuilds future occurrences)
+PATCH /api/recurrences/:id
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "rule": {
+    "freq": "weekly",
+    "interval": 1,
+    "byWeekday": [2, 4]
+  }
+}
+```
+
+```bash Detach one occurrence ("change just this one")
+POST /api/recurrences/:id/detach/:commitmentId
+Authorization: Bearer <token>
+```
+
+```bash Stop the series
+DELETE /api/recurrences/:id
+Authorization: Bearer <token>
+```
+
+</CodeGroup>
+
+### Creating a recurring commitment — full example
+
+<Steps>
+  <Step title="Parse the phrase client-side">
+    The shared `parseRecurrence` function (available in `@cue/shared`) returns the rule and which substrings it consumed — ready to strip from the title before saving.
+
+    ```typescript
+    import { parseRecurrence, stripRecurrence } from '@cue/shared'
+
+    const phrase = 'team sync every other friday until 15 December'
+    const parsed = parseRecurrence(phrase, new Date())
+    // parsed.rule   → { freq: 'weekly', interval: 2, byWeekday: [5], until: '2025-12-15' }
+    // parsed.matches → ['every other friday', 'until 15 December']
+
+    const cleanTitle = stripRecurrence(phrase, parsed)
+    // → 'team sync'
+    ```
+  </Step>
+
+  <Step title="POST the rule to the API">
+    ```typescript
+    const response = await fetch('/api/recurrences', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: cleanTitle,            // 'team sync'
+        kind: 'meeting',
+        durationMinutes: 30,
+        hour: parsed.rule.hour ?? 9,  // from parseWhen or user input
+        minute: 0,
+        startsOn: '2025-10-03',       // first Friday on or after today
+        rule: parsed.rule,
+      }),
+    })
+
+    const { recurrence } = await response.json()
+    // recurrence.summary → 'Every other Friday until 15 Dec'
+    // recurrence.nextAt  → ISO string of the next occurrence
+    ```
+  </Step>
+
+  <Step title="Cue materialises immediately">
+    Occurrences appear in your calendar straight away — no wait for the hourly sweep. The `nextAt` field in the response already reflects the real written row.
+  </Step>
+</Steps>
+
+### Response shape
+
+```json
+{
+  "recurrence": {
+    "id": "uuid",
+    "title": "team sync",
+    "kind": "meeting",
+    "durationMinutes": 30,
+    "startsOn": "2025-10-03",
+    "hour": 10,
+    "minute": 0,
+    "rule": {
+      "freq": "weekly",
+      "interval": 2,
+      "byWeekday": [5],
+      "until": "2025-12-15"
+    },
+    "status": "active",
+    "summary": "Every other Friday until 15 Dec",
+    "nextAt": "2025-10-03T10:00:00.000Z",
+    "upcomingCount": 6,
+    "createdAt": "2025-09-29T08:00:00.000Z"
+  }
+}
+```

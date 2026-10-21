@@ -1,0 +1,264 @@
+---
+title: "Quick Add API — Natural Language Plan Creation"
+sidebarTitle: "Quick Add"
+description: "POST /api/quick parses a plain sentence into a structured plan, fills gaps from history, and saves it — returning every assumption made with its evidence."
+---
+
+Quick Add collapses the entire capture flow into a single sentence. Type "dentist friday 6pm" and Cue parses the time, looks up your history for how long dentist appointments usually run and where the dentist is, saves the commitment, schedules the first reminder, and tells you exactly what it assumed. Nothing is hidden — every inference comes back as a plain-text `assumptions` string so you can correct it before or after saving.
+
+The preview endpoint shows what would happen without writing anything. Save then repeats the same work rather than trusting a client-supplied plan, so what is saved is always what was shown.
+
+## Endpoints
+
+### `POST /api/quick/preview`
+
+Dry run — what would happen if you saved this text, without writing anything. Called as the user types to show the interpretation in real time.
+
+**Request body**
+
+<ParamField body="text" type="string" required>
+  The plain-language input. 1–1000 characters. Examples: `"dentist friday 6pm"`, `"standup every tuesday 10am"`, `"Goa 12–14 nov"`.
+</ParamField>
+
+<ParamField body="careful" type="boolean">
+  Set `true` when typing has paused and the AI should be asked for a better reading of an ambiguous line. Never on every keystroke.
+</ParamField>
+
+**Response** — a `QuickPlan` (see response shape below).
+
+---
+
+### `POST /api/quick`
+
+Parses, fills gaps from history, and saves.
+
+**Request body**
+
+<ParamField body="text" type="string" required>
+  The plain-language input. 1–1000 characters.
+</ParamField>
+
+<ParamField body="allowConflict" type="boolean">
+  Set `true` after the user has been shown a clash and chosen to double-book.
+</ParamField>
+
+<ParamField body="contactId" type="string | null">
+  Override the contact the preview matched. `null` = "not them"; a UUID = "yes, this person".
+</ParamField>
+
+<ParamField body="placeId" type="string | null">
+  Override the place the preview matched. `null` = "not there".
+</ParamField>
+
+<ParamField body="accountName" type="string">
+  A clinic or company named in the sentence — sets the plan's `placeLabel`.
+</ParamField>
+
+<ParamField body="trip" type="string">
+  For plans in another city: `"add"` creates a trip there; `"skip"` saves without one.
+</ParamField>
+
+<ParamField body="onTrip" type="boolean">
+  For a "when I go to …" intention with a trip already planned: schedule it on that trip.
+</ParamField>
+
+<ParamField body="accept" type="string[]">
+  IDs of suggestions the user accepted. One of: `start-early`, `gift`, `prepare`, `move-after-trip`, `book-cab`. Accepted suggestions are applied on save only.
+</ParamField>
+
+<ParamField body="sphere" type="string">
+  Override the work/personal classification: `"work"` or `"personal"`.
+</ParamField>
+
+**Response** — `201` with the full `QuickPlan` plus:
+
+<ResponseField name="id" type="string">UUID of the saved item.</ResponseField>
+<ResponseField name="ids" type="string[]">All saved item UUIDs (e.g. commitment + web check-in reminder for a flight).</ResponseField>
+<ResponseField name="extras" type="object[]">Additional items created from accepted suggestions, each with `kind` and `id`.</ResponseField>
+<ResponseField name="savedTrip" type="object | null">Trip created or extended for the plan, with `id`, `placeLabel`, `startsOn`, `endsOn`, and `created: boolean`.</ResponseField>
+<ResponseField name="waiting" type="IntentionDTO[]">Saved intentions for this trip's destination, surfaced now that a trip exists.</ResponseField>
+
+**Error codes:**
+
+`409 time_conflict` — slot is taken. Response includes `plan` (the parsed plan), `conflicts`, and `suggestions`.
+
+`422 not_understood` — the text could not be parsed into any kind of plan.
+
+`428 needs_time` — the text was understood but contains no time. Response includes `plan` with `question` and `choices` to tap.
+
+`300 needs_person` — the text names a pronoun ("him", "her") with no certain match. Response includes `plan` with `people` to choose from.
+
+<CodeGroup>
+```bash quick-add
+curl -X POST http://localhost:3002/api/quick \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "dentist friday 6pm"}'
+```
+
+```json quick-add-response
+{
+  "id": "b2e4f8a1-...",
+  "kind": "commitment",
+  "title": "Dentist",
+  "commitmentKind": "meeting",
+  "dueAt": "2026-10-17T18:00:00+05:30",
+  "durationMinutes": 45,
+  "placeLabel": "City Dental Clinic",
+  "assumptions": [
+    "Duration: 45 min (your usual for dentist)",
+    "Where: City Dental Clinic (last time)"
+  ],
+  "readBy": "rules",
+  "summary": "Dentist — Fri 17 Oct, 6:00 pm",
+  "suggestions": [],
+  "sphere": "personal"
+}
+```
+</CodeGroup>
+
+<CodeGroup>
+```bash recurring-plan
+curl -X POST http://localhost:3002/api/quick \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "standup every tuesday at 10am"}'
+```
+
+```json recurring-plan-response
+{
+  "id": "c3f5a9b2-...",
+  "kind": "recurrence",
+  "title": "Standup",
+  "startsOn": "2026-10-20",
+  "hour": 10,
+  "minute": 0,
+  "rule": { "freq": "weekly", "interval": 1, "byWeekday": [2] },
+  "assumptions": ["Read as: meeting"],
+  "summary": "Standup — every Tuesday, from 20 Oct",
+  "sphere": "work"
+}
+```
+</CodeGroup>
+
+---
+
+### `GET /api/quick/suggestions`
+
+Returns titles the authenticated user captures often, for one-tap capture with nothing typed.
+
+**Response**
+
+```json
+{ "frequent": ["Standup", "Call dentist", "Follow up with Ravi"] }
+```
+
+---
+
+### `DELETE /api/quick/:kind/:id`
+
+Undo — hard-deletes the item created by the quick-add flow. This is the one place a hard delete survives; undoing a two-second-old mistake should not leave a trail.
+
+**Path parameters**
+
+<ParamField path="kind" type="string" required>
+  One of `commitment`, `intention`, `trip`, `recurrence`, `expense`, `owed`, `tracker`, `bill`, `delivery`, `exam`.
+</ParamField>
+
+<ParamField path="id" type="string" required>
+  UUID of the item to remove.
+</ParamField>
+
+**Query parameters**
+
+<ParamField query="alsoTrip" type="string">
+  UUID of a trip that was created only for this plan. If the trip has no other commitments, it is deleted too.
+</ParamField>
+
+**Response** — `{ ok: true }` or `404 not_found`.
+
+---
+
+## QuickPlan response shape
+
+Every preview and save response returns a `QuickPlan` with these fields:
+
+<ResponseField name="kind" type="string">
+  What was recognised: `commitment`, `intention`, `trip`, `recurrence`, `expense`, `owed`, `tracker`, `exam`, `bill`, `delivery`, `needsTime`, `needsPerson`, or `unclear`.
+</ResponseField>
+
+<ResponseField name="title" type="string">The plan's title as parsed.</ResponseField>
+
+<ResponseField name="commitmentKind" type="string">
+  One of `callback`, `meeting`, `task`, `followup`, `focus`.
+</ResponseField>
+
+<ResponseField name="dueAt" type="string | null">ISO 8601 datetime. `null` when no time was found.</ResponseField>
+
+<ResponseField name="durationMinutes" type="number">Duration — from history or the kind's default.</ResponseField>
+
+<ResponseField name="flexibility" type="string">`fixed` or `flexible`.</ResponseField>
+
+<ResponseField name="preferredWindow" type="string | null">
+  When `flexible` — one of `morning`, `afternoon`, `evening`, `night`.
+</ResponseField>
+
+<ResponseField name="placeLabel" type="string | null">Location label, from the sentence or history.</ResponseField>
+
+<ResponseField name="placeId" type="string | null">UUID of a matched saved place.</ResponseField>
+
+<ResponseField name="contactId" type="string | null">UUID of a matched contact.</ResponseField>
+
+<ResponseField name="personName" type="string | null">Person named in the sentence (before lookup).</ResponseField>
+
+<ResponseField name="assumptions" type="string[]">
+  Plain-English explanations of every inference made.
+
+  Examples:
+  - `"Duration: 45 min (your usual for dentist)"`
+  - `"Where: City Dental Clinic (last time)"`
+  - `"No time given, so 9am."`
+  - `"Read as: meeting"`
+  - `"You usually do this around 6:00 pm."`
+</ResponseField>
+
+<ResponseField name="readBy" type="string">
+  `"rules"` when the rule-based parser handled it; `"ai"` when the AI read it after the rules were unsure.
+</ResponseField>
+
+<ResponseField name="suggestions" type="object[]">
+  Better plans on offer — each applied on save only if the user accepts it. Each has an `id` (e.g. `"start-early"`, `"prepare"`), a `label`, and optionally a `moveTo` time or `extra` commitment.
+</ResponseField>
+
+<ResponseField name="links" type="object">
+  People, places, and accounts the sentence seems to name. Offered for confirmation, never assumed (except a single certain contact match).
+</ResponseField>
+
+<ResponseField name="sphere" type="string | null">
+  `"work"` or `"personal"`, read from the words or `null` when neither applies.
+</ResponseField>
+
+<ResponseField name="summary" type="string">
+  One-line plain-text summary: `"Dentist — Fri 17 Oct, 6:00 pm"`.
+</ResponseField>
+
+<ResponseField name="question" type="string | null">
+  When `kind` is `needsTime` or `needsPerson` — the single question to ask.
+</ResponseField>
+
+<ResponseField name="choices" type="object[]">
+  Tappable answers for `needsTime` / `needsPerson`. Each sets the line to how it reads with that answer.
+</ResponseField>
+
+---
+
+## How history fills gaps
+
+When parsing, Cue calls `recallSimilar` to look up previous commitments with similar titles. If matches exist:
+
+- **Duration** — uses the most common duration seen for that type of plan.
+- **Place** — uses the place recorded for previous occurrences.
+- **Contact** — uses the contact linked to previous occurrences.
+- **Time of day** — uses the median hour, if a consistent one emerges.
+
+Every inference is surfaced in `assumptions`. The user can correct any of them on the preview screen before saving.

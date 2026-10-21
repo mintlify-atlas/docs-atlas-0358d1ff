@@ -1,0 +1,158 @@
+---
+title: "Cue Architecture: Monorepo, API, PWA, and Workers"
+sidebarTitle: "Architecture"
+description: "Cue is a Node.js monorepo — Fastify 5 API with Drizzle ORM, a React 18 PWA, shared Zod schemas, and a suite of background workers all in one process."
+---
+
+Cue is a TypeScript monorepo (npm workspaces, Node ≥ 22) composed of a Fastify 5 API, a React 18 PWA, a shared logic package, and an Android TWA wrapper. In production, the entire server-side — API routes, static file serving, and all background workers — runs as a **single Node process** behind a reverse proxy. This page explains how those pieces fit together, how data is isolated between tenants, and what every background worker does.
+
+## Monorepo Layout
+
+| Path | What it is |
+|---|---|
+| `apps/api` | Fastify 5 API server. Run as TypeScript source via `tsx` (no compilation step in development). Drizzle ORM over `postgres.js`. Hand-written, forward-only SQL migrations in `apps/api/migrations/`. |
+| `apps/web` | React 18 PWA. Vite 6 with `vite-plugin-pwa` (`injectManifest` strategy, Workbox 7). One global stylesheet. `react-router-dom` 7. Capacitor-ready for the Android build. |
+| `packages/shared` | `@cue/shared` — Zod schemas, DTO types, sentence parsers (`parseWhen`, `parseRecurrence`, `extractRoles`, `normalizeHinglish`), recurrence rule engine, Hindi vocabulary tables. Consumed as TypeScript source by both apps. |
+| `android` | Bubblewrap TWA definitions and Play Store listings for `in.vitelio.cue`. |
+
+## The Single-Process Model
+
+In production the API process does three things at once:
+
+1. **Serves the HTTP API** — all routes under `/api`, plus `/health` and `/.well-known/assetlinks.json` unprefixed.
+2. **Serves the built PWA** — `@fastify/static` mounts `apps/web/dist`; a catch-all SPA fallback serves `index.html` for any non-`/api` GET that is not a file. This means one origin, no CORS in production, and the service worker scope covers the whole site.
+3. **Runs all background workers** — started in-process at boot, each on its own interval, each with a guard that prevents ticks from overlapping.
+
+```
+One systemd unit (cue)
+├── Fastify HTTP server  (:3002 → Caddy → :443)
+│   ├── /health
+│   ├── /api/*  (all authenticated routes)
+│   └── /*      (React PWA, SPA fallback)
+└── Background workers (all in-process)
+    ├── Reminders (20 s)
+    ├── Morning brief (5 min)
+    ├── Evening nudge (5 min)
+    └── … (14 workers total)
+```
+
+Splitting workers into a separate process is a one-line change — the `FOR UPDATE SKIP LOCKED` claim in the reminder worker already makes it safe to run multiple instances — but the single-process model keeps deployment to one service and one `DATABASE_URL`.
+
+## Background Workers
+
+All workers are started from `apps/api/src/index.ts` and run inside the API process. Each fires once at boot, then on its interval, with a guard so ticks never overlap. Per-user schedules are evaluated in the **user's own time zone** (`users.timezone`), and each worker records the local date it last sent so a process restart cannot double-send.
+
+| Worker | Interval | What it does |
+|---|---|---|
+| **Reminders** | 20 s | Claims due `reminders` rows with `FOR UPDATE SKIP LOCKED`, pushes notifications, escalates the chain (`worker/reminders.ts`) |
+| **Morning brief** | 5 min | At `morningBriefHour` (default 8 AM local): today's shape — meetings, journeys, parcels, bills, free time (`services/morningBrief.ts`) |
+| **Evening nudge** | 5 min | At `dailyNudgeHour` (default 7 PM local): "did you log everything?" plus a plan for tomorrow (`services/dailyNudge.ts`) |
+| **Follow-ups** | 2 min | Asks "anything to follow up?" shortly after a one-off meeting ends (`services/wrapUp.ts`) |
+| **Meeting prep** | 2 min | 15 minutes before a meeting, surfaces what is still open from last time (`services/meetingPrep.ts`) |
+| **Weekly review** | 10 min | Friday at `weeklyReviewHour` (default 5 PM local): done, slipped, waiting, next week, targets (`services/weeklyReview.ts`) |
+| **Exam week** | — | Sunday evening summary for anyone tracking a government exam (`services/examWeek.ts`) |
+| **Focus** | 2 min | Closes finished focus blocks; no push, just status update (`services/focus.ts`) |
+| **Daily report** | 5 min | Opt-in, at `reportHour` (default 6 PM local): "your report is ready" (`services/dailyReport.ts`) |
+| **Bills** | 15 min | Reminder days before, on the day, and the day after; fires between 9 AM and 9 PM local (`services/bills.ts`) |
+| **Deliveries** | 15 min | "Arriving today" with cash-on-delivery amount (`services/deliveries.ts`) |
+| **Mail reader** | 15 min | Reads connected Gmail/Outlook mailboxes for tickets, bills, parcels, insurance, PUC, FASTag, challans (`services/mailReader.ts`) |
+| **Notice watch** | — | Polls exam boards' public pages for new result and form notices (`services/noticeWatch.ts`) |
+| **Demo cleanup** | 1 h | Deletes demo orgs older than 24 hours (`services/demo.ts`) |
+
+### Recurrence Sweep
+
+The recurrence sweep runs **once at boot and then every hour** (`services/recurrence.ts`). It maintains a rolling **120-day window** of materialized occurrences for every active repeating plan. Occurrences are ordinary `commitments` rows — the reminder worker, conflict detection, and the Today screen carry on with no knowledge that recurrence exists at all.
+
+Generation is **idempotent**: a unique index on `(recurrence_id, occurrence_on)` means running the sweep twice, or running two API instances concurrently, cannot produce a duplicate occurrence.
+
+### Calendar Feed Sync
+
+Calendar feeds (iCal URL, uploaded `.ics`, Google Calendar, Microsoft Outlook) are re-read **every 30 minutes** (`services/calendarFeed.ts`). Google's secret iCal feed refreshes slowly — often hours behind — so polling faster would only burn requests. Feeds can also be re-read on demand via `POST /calendar-feeds/:id/sync`.
+
+## Auth and Tenant Isolation
+
+<Tabs>
+  <Tab title="JWT Auth">
+    Sessions are 30-day JWTs signed with `JWT_SECRET` using `@fastify/jwt`. The token payload carries `{ sub: userId, orgId, email }`. Every authenticated route calls `app.authenticate`, then `scope(req)` to extract the claims.
+
+    **Tenant IDs come from the token, never from a request body.** A client cannot escalate to another org's data by sending a different `orgId` in a request.
+
+    ```typescript
+    // Every query is scoped to the caller's org and user
+    const { orgId, userId } = scope(req)
+    await db.select().from(commitments)
+      .where(and(eq(commitments.orgId, orgId), eq(commitments.userId, userId)))
+    ```
+  </Tab>
+  <Tab title="Roles">
+    Registration creates an org (`"<name>'s account"`) and sets the registering user as `owner`. Every other user is a `member` by default — the column defaults to `member`, so any path nobody has written yet gets the safer of the two roles.
+
+    The role is **read from the database row on every request**, never from the JWT. A role change (e.g. removing someone's owner status) takes effect on their next request, not 30 days later when their token expires.
+
+    Org-level settings — AI provider, API key, endpoint — are owner-only. Members see one line ("Switched on by your account owner") rather than a disabled form.
+  </Tab>
+  <Tab title="Data Isolation">
+    Every tenant-owned table carries an `orgId` column (defined in `apps/api/src/db/schema.ts`). Isolation is currently enforced in the **query layer** via `scope(req)` in `auth.ts`, not by PostgreSQL row-level security. The column was added from the first migration specifically because retrofitting it later is painful; the RLS policies themselves are a planned future migration.
+
+    ```typescript
+    // From apps/api/src/db/schema.ts (schema comment)
+    /**
+     * Every tenant-owned row carries `orgId`. Adding that column later is the
+     * genuinely painful migration, so it is here from the first commit even
+     * though isolation is currently enforced in the query layer (scope() in
+     * src/auth.ts) rather than by Postgres row-level security.
+     */
+    ```
+  </Tab>
+</Tabs>
+
+## CORS and Allowed Origins
+
+The CORS allow-list is set at startup in `apps/api/src/index.ts` using `@fastify/cors`:
+
+```typescript
+await app.register(cors, {
+  // The Capacitor Android build loads from capacitor://localhost,
+  // so the allow-list is a list rather than a single origin from the start.
+  origin: [env.webOrigin, 'capacitor://localhost', 'http://localhost'],
+  credentials: true,
+})
+```
+
+| Origin | Why it is allowed |
+|---|---|
+| `WEB_ORIGIN` (e.g. `https://cue.example.com`) | The deployed PWA — set in `.env` |
+| `capacitor://localhost` | The Android TWA (Bubblewrap / Capacitor) |
+| `http://localhost` | Local development |
+
+In production, `VITE_API_URL` should be **blank** so the browser calls a relative `/api` — same origin, no CORS at all. The CORS allow-list matters only in development (web on `:5173`, API on `:3002`) and for the Android app.
+
+## The Reminder Worker and Horizontal Scaling
+
+<Note>
+  The reminder worker uses `FOR UPDATE SKIP LOCKED` when claiming due rows, which makes it safe to run multiple API instances against the same database. Each instance will claim a disjoint set of reminders — no double-sends, no lock contention. Splitting workers into a separate process or container requires only a one-line change: the concurrency safety is already in place.
+</Note>
+
+The worker polls every 20 seconds (`REMINDER_POLL_MS`, default `20000`). For each due reminder it:
+
+1. Cancels the chain if the commitment is no longer `pending`.
+2. Checks for a **focus hold** — during an active focus block, non-critical reminders are re-queued for when the block ends.
+3. Checks **keep apart** — for users with work/personal split enabled, personal reminders wait until after work hours and work reminders wait until the next work day. Critical items always ring immediately.
+4. Pushes the notification with the right copy: booking departure time, "due now", "still open — 30 min overdue", etc.
+5. Queues the next attempt `ESCALATION_MINUTES` (default 15) later, up to `MAX_ESCALATIONS` (default 4) total buzzes.
+
+After `MAX_ESCALATIONS` the chain stops, but the commitment stays in the **Triage** screen (`GET /api/triage`) until explicitly resolved.
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Managed Platform Deploy" icon="cloud" href="/deployment/managed-platform">
+    Deploy to Railway, Fly.io, or Render — HTTPS included, no server to patch.
+  </Card>
+  <Card title="Self-Hosted Deploy" icon="server" href="/deployment/self-hosted">
+    Run Cue on your own VPS with systemd, Caddy, and PostgreSQL.
+  </Card>
+  <Card title="Local Development Setup" icon="laptop" href="/development/local-setup">
+    Full local environment guide: database, `.env`, migrations, and the test suite.
+  </Card>
+</CardGroup>

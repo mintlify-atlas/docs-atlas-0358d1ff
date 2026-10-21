@@ -1,0 +1,193 @@
+---
+title: "Trips, Travel Planning, and Saved Intentions"
+sidebarTitle: "Trips & Intentions"
+description: "Save dateless wishes for a city months in advance, plan a trip, and Cue assembles everything — bookings, plans, packing lists, and intentions — automatically."
+---
+
+Months before any trip you can save a wish with no date at all: *"When I go to Mathura, I want to try the peda."* It sits in `intentions`, dateless, until a trip to that place exists. Plan the trip and all the wishes surface together, ready to be scheduled in one tap.
+
+## Intentions — dateless wishes for a place
+
+An intention is not a reminder for tomorrow. It is a deliberate `NULL` on the date column — a wish that waits for the right context rather than firing at an arbitrary time.
+
+<Steps>
+  <Step title="Save a wish">
+    Type it in the capture box: *"when I go to Mathura, I want to try the peda"* or *"buy lakh chudi for my Jaipur trip"*. `parseIntention` reads the place and the task out of it.
+  </Step>
+  <Step title="It waits in intentions">
+    The row is saved to the `intentions` table with `placeLabel` but no `dueAt`. It appears on the Intentions screen and on the matching city's page.
+  </Step>
+  <Step title="A trip is planned">
+    When a trip to that city is created, matching intentions surface: *"3 things saved for Mathura — Visit Banke Bihari Temple · Try famous peda · Visit the local market"*
+  </Step>
+  <Step title="Schedule or skip">
+    Tapping **Add to trip** schedules all matching wishes as flexible plans on the first evening of the trip. Each stays flexible by default — "visit the temple one evening" should not be pinned to 6:00 PM against your will.
+  </Step>
+</Steps>
+
+Matching is **case-insensitive on the city label**: "Mathura" typed in June and "mathura" typed in October are obviously the same intent.
+
+### Sentence patterns `parseIntention` understands
+
+| Pattern | Example |
+|---------|---------|
+| When I go to … | `when I go to Mathura, remind me to buy peda` |
+| … when I'm in … | `try the local food while I'm in Mathura` |
+| … for my … trip | `pack charger and passport for the Delhi trip` |
+| … for a trip to … | `buy sunscreen for my trip to Goa` |
+
+## Trip container vs task
+
+A trip earned its own table because containment is a relationship, not an attribute. `fixed`/`flexible` is just a column on a commitment; *"this plan happens as part of this trip"* is a foreign key pointing at a separate row. Trying to express that as an attribute would mean duplicating the trip dates on every plan that belongs to it.
+
+### Strictness levels
+
+| Strictness | Meaning | Travel conflict severity |
+|-----------|---------|------------------------|
+| `strict` | You will definitely be there | Impractical — hard to ignore |
+| `flexible` | Plans may shift | Tight — worth noting |
+| `tentative` | Not confirmed yet | Worth a look |
+
+### Deleting a trip
+
+Deleting a trip uses `ON DELETE SET NULL` on the `tripId` foreign key — plans attached to the trip are **detached**, not deleted. The UI says how many plans survived: *"3 plans were kept; they are no longer attached to this trip."*
+
+A cancelled journey does not cancel the dentist appointment you filed under it.
+
+## Creating trips from capture
+
+`parseTrip` handles all the ways people describe a trip:
+
+<Tabs>
+  <Tab title="Day range, month at end">
+    ```
+    2 oct to 4 oct trip to agra
+    → Trip to Agra, 2 Oct – 4 Oct
+    ```
+  </Tab>
+  <Tab title="Month at start">
+    ```
+    oct 2 to oct 4 going to agra
+    → Trip to Agra, 2 Oct – 4 Oct
+    ```
+  </Tab>
+  <Tab title="Month on both sides">
+    ```
+    visiting agra for 3 days on 2 oct to 4 oct
+    → Trip to Agra, 2 Oct – 4 Oct
+    ```
+  </Tab>
+  <Tab title="Year rollover">
+    ```
+    going to Goa 30 dec to 2 jan
+    → Trip to Goa, 30 Dec – 2 Jan (next year)
+    ```
+    "30 to 2" is only backwards within one month. A range that crosses a month boundary is accepted and rolled into the next year.
+  </Tab>
+  <Tab title="Nights instead of days">
+    ```
+    going to agra for 3 nights from 2 oct
+    → Trip to Agra, 2 Oct – 5 Oct
+    ```
+    **Three days vs three nights are counted differently** — people say them precisely. Three days from the 2nd ends on the 4th; three nights ends on the 5th.
+  </Tab>
+</Tabs>
+
+A backwards range like `14 oct to 12 oct` is refused rather than silently swapped.
+
+### API example
+
+<CodeGroup>
+```http title="Create a trip"
+POST /api/quick
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "text": "going to Mathura 12 oct to 14 oct"
+}
+```
+
+```json title="Response (201 Created)"
+{
+  "kind": "trip",
+  "title": "Mathura",
+  "placeLabel": "Mathura",
+  "startsOn": "2025-10-12",
+  "endsOn": "2025-10-14",
+  "id": "trip-uuid-...",
+  "savedTrip": {
+    "id": "trip-uuid-...",
+    "placeLabel": "Mathura",
+    "startsOn": "2025-10-12",
+    "endsOn": "2025-10-14"
+  },
+  "waiting": [
+    { "id": "int-uuid-1", "title": "Try the peda", "placeLabel": "Mathura" },
+    { "id": "int-uuid-2", "title": "Visit Banke Bihari Temple", "placeLabel": "Mathura" }
+  ]
+}
+```
+
+```http title="Add an intention for Mathura"
+POST /api/quick
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "text": "when I go to Mathura I want to try the famous peda"
+}
+```
+
+```json title="Intention saved"
+{
+  "kind": "intention",
+  "title": "Try the famous peda",
+  "placeLabel": "Mathura",
+  "id": "int-uuid-...",
+  "assumptions": [
+    "No date — it waits until you plan a trip to Mathura."
+  ],
+  "summary": "\"Try the famous peda\" saved for Mathura"
+}
+```
+</CodeGroup>
+
+## Trips view — journeys dashboard
+
+The **Trips** screen is the journeys dashboard. For each trip it shows:
+
+- Place label and date range
+- Days away (or days since it ended)
+- Number of plans already attached
+- Number of wishes still waiting to be scheduled
+- Strictness badge
+
+Trips are also drawn across the days they cover in the Week and Month calendar views — a trip heading appears above each day's tasks in its own colour. A trip already under way shows on today's view, because today looks free while you are away is the worst kind of lie.
+
+## Packing lists
+
+Attach a packing list to any trip commitment using the checklist syntax:
+
+```
+pack for Mathura trip: charger, passport, sunscreen, medicines
+```
+
+This saves `pack for Mathura trip` with four checklist items that can be ticked one at a time. Each item is its own database row — ticking one is a single cheap write from a phone with one bar of signal.
+
+## Nearby intentions (`POST /api/intentions/nearby`)
+
+When you are physically near a saved place, `POST /api/intentions/nearby` returns matching wishes:
+
+```
+You are near Mathura — 2 things saved for here
+Buy peda · Visit Banke Bihari Temple
+```
+
+The endpoint geocodes each distinct saved place label once (cached permanently in `geocode_cache`) and returns anything within **40 km**. A city is big, so the radius means "you are in Mathura", not "on this street".
+
+<Warning>
+  **Two deliberate limits:**
+  1. Nearby only runs when location permission has already been granted. Opening a planner should not fire a permission prompt out of nowhere.
+  2. Nearby only runs while the app is open. A browser cannot watch your location in the background — there is no workaround, and pretending otherwise would be a lie. A real arrival notification requires the Capacitor Android build.
+</Warning>

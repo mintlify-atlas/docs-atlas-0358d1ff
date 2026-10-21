@@ -1,0 +1,296 @@
+---
+title: "Recurrences API — Create and Manage Repeating Plans"
+sidebarTitle: "Recurrences"
+description: "CRUD for recurring rules — stored as rules, with real commitment rows generated in a rolling 120-day window that the reminder engine works against directly."
+---
+
+Recurrences store a repeating rule once, then write real `commitments` rows for each occurrence in a rolling 120-day window. The reminder engine, conflict detection, and every UI view are completely unaware that recurrence exists — they work against ordinary commitment rows, which is what lets a recurring meeting clash with a new plan just like a hand-created one would.
+
+When you stop or edit a series, occurrences already done or manually detached are left alone. Only future untouched ones are affected.
+
+## How rule storage works
+
+| Layer | What it holds |
+|---|---|
+| `recurrences` table | The rule: frequency, interval, weekday/month constraints, start date and time. |
+| `commitments` table | One row per generated occurrence, with a `recurrenceId` back-reference. |
+
+A unique index on `(recurrence_id, occurrence_on)` prevents duplicate rows if two generation sweeps run concurrently. Editing a series calls `regenerate`: future pending (untouched) occurrences are deleted and rewritten from the updated rule; detached occurrences (moved by hand) are left in place.
+
+## Endpoints
+
+### `GET /api/recurrences`
+
+Returns all recurrence rules for the authenticated user. For each rule, the next due occurrence is read from the generated commitments table (what the user actually has), falling back to rule-based projection beyond the written window.
+
+**Response**
+
+<ResponseField name="recurrences" type="RecurrenceDTO[]">
+  Array of recurrence records.
+
+  <Expandable title="RecurrenceDTO fields">
+    <ResponseField name="id" type="string">UUID.</ResponseField>
+    <ResponseField name="title" type="string">What the series is.</ResponseField>
+    <ResponseField name="kind" type="string">One of `callback`, `meeting`, `task`, `followup`, `focus`.</ResponseField>
+    <ResponseField name="notes" type="string | null">Notes copied to each occurrence.</ResponseField>
+    <ResponseField name="durationMinutes" type="number">Duration copied to each occurrence.</ResponseField>
+    <ResponseField name="priority" type="string">One of `critical`, `high`, `normal`, `low`, `nice_to_have`.</ResponseField>
+    <ResponseField name="placeId" type="string | null">Linked place UUID.</ResponseField>
+    <ResponseField name="placeName" type="string | null">Linked place name.</ResponseField>
+    <ResponseField name="placeLabel" type="string | null">Free-text location label.</ResponseField>
+    <ResponseField name="contactId" type="string | null">Linked contact UUID.</ResponseField>
+    <ResponseField name="startsOn" type="string">`YYYY-MM-DD` — first occurrence date.</ResponseField>
+    <ResponseField name="hour" type="number">Hour of day (0–23).</ResponseField>
+    <ResponseField name="minute" type="number">Minute of hour (0–59).</ResponseField>
+    <ResponseField name="rule" type="RecurrenceRule">The structured rule object (see below).</ResponseField>
+    <ResponseField name="status" type="string">`active` or `stopped`.</ResponseField>
+    <ResponseField name="summary" type="string">Human-readable description: `"Every Tuesday at 10:00 am"`.</ResponseField>
+    <ResponseField name="nextAt" type="string | null">ISO 8601 — when the next occurrence is due.</ResponseField>
+    <ResponseField name="upcomingCount" type="number">How many occurrences are still ahead in the written window.</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### `GET /api/recurrences/:id`
+
+Returns a single recurrence rule with all its generated occurrences.
+
+**Response**
+
+<ResponseField name="recurrence" type="RecurrenceDTO">The rule record.</ResponseField>
+<ResponseField name="occurrences" type="object[]">
+  All commitment rows generated for this series, ordered by `dueAt`.
+
+  <Expandable title="occurrence fields">
+    <ResponseField name="id" type="string">Commitment UUID.</ResponseField>
+    <ResponseField name="title" type="string">Title (may differ from rule if detached and edited).</ResponseField>
+    <ResponseField name="dueAt" type="string">ISO 8601.</ResponseField>
+    <ResponseField name="status" type="string">Commitment status.</ResponseField>
+    <ResponseField name="detached" type="boolean">`true` if this occurrence was edited independently and no longer follows the series rule.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+---
+
+### `POST /api/recurrences`
+
+Creates a new recurrence rule and immediately generates the first batch of occurrences. The user is looking at the screen now and expects to see the dates appear.
+
+**Request body**
+
+<ParamField body="title" type="string" required>
+  What the series is. 1–300 characters.
+</ParamField>
+
+<ParamField body="kind" type="string" default="task">
+  One of `callback`, `meeting`, `task`, `followup`, `focus`.
+</ParamField>
+
+<ParamField body="startsOn" type="string" required>
+  `YYYY-MM-DD` — date of the first occurrence and the phase anchor for "every other week".
+</ParamField>
+
+<ParamField body="hour" type="number" default="9">
+  Hour of day (0–23).
+</ParamField>
+
+<ParamField body="minute" type="number" default="0">
+  Minute (0–59).
+</ParamField>
+
+<ParamField body="durationMinutes" type="number" default="30">
+  Duration in minutes. 5–480.
+</ParamField>
+
+<ParamField body="priority" type="string" default="normal">
+  One of `critical`, `high`, `normal`, `low`, `nice_to_have`.
+</ParamField>
+
+<ParamField body="placeId" type="string">UUID of a saved place.</ParamField>
+<ParamField body="placeLabel" type="string">Free-text location label.</ParamField>
+<ParamField body="contactId" type="string">UUID of a contact.</ParamField>
+<ParamField body="notes" type="string">Notes. Up to 4000 characters.</ParamField>
+
+<ParamField body="rule" type="object" required>
+  The recurrence rule.
+
+  <Expandable title="rule fields">
+    <ParamField body="rule.freq" type="string" required>
+      One of `daily`, `weekly`, `monthly`, `yearly`.
+    </ParamField>
+    <ParamField body="rule.interval" type="number" default="1">
+      Repeat every N periods. `2` with `weekly` = every other week. 1–52.
+    </ParamField>
+    <ParamField body="rule.byWeekday" type="number[]">
+      0=Sunday … 6=Saturday. For `weekly` rules: which days of the week. For `monthly` with `setPos`: which weekday.
+    </ParamField>
+    <ParamField body="rule.byMonthDay" type="number">
+      Day of month (1–31). For `monthly` rules without a weekday constraint.
+    </ParamField>
+    <ParamField body="rule.byMonth" type="number">
+      Month index (0=January … 11=December). For `yearly` rules.
+    </ParamField>
+    <ParamField body="rule.setPos" type="number">
+      1–4 for first through fourth, -1 for last. Combined with `byWeekday` for "the second Tuesday of the month".
+    </ParamField>
+    <ParamField body="rule.until" type="string">
+      `YYYY-MM-DD` — stop generating after this date.
+    </ParamField>
+    <ParamField body="rule.count" type="number">
+      Stop after this many occurrences. 1–500.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+**Response** — `201`:
+
+```json
+{
+  "recurrence": {
+    "id": "...",
+    "title": "Standup",
+    "kind": "meeting",
+    "summary": "Every Tuesday at 10:00 am",
+    "nextAt": "2026-10-20T10:00:00+05:30",
+    "upcomingCount": 17,
+    ...
+  }
+}
+```
+
+<CodeGroup>
+```bash create-weekly
+curl -X POST http://localhost:3002/api/recurrences \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Standup",
+    "kind": "meeting",
+    "startsOn": "2026-10-20",
+    "hour": 10,
+    "minute": 0,
+    "durationMinutes": 30,
+    "rule": {
+      "freq": "weekly",
+      "interval": 1,
+      "byWeekday": [2]
+    }
+  }'
+```
+
+```bash create-monthly
+curl -X POST http://localhost:3002/api/recurrences \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Monthly review",
+    "kind": "meeting",
+    "startsOn": "2026-10-01",
+    "hour": 15,
+    "minute": 0,
+    "durationMinutes": 60,
+    "rule": {
+      "freq": "monthly",
+      "interval": 1,
+      "byMonthDay": 1
+    }
+  }'
+```
+
+```bash create-daily-medicine
+# Medicine at 9am and 9pm — two recurrences, each managed separately
+curl -X POST http://localhost:3002/api/recurrences \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Medicine",
+    "kind": "task",
+    "startsOn": "2026-10-15",
+    "hour": 9,
+    "minute": 0,
+    "durationMinutes": 5,
+    "rule": { "freq": "daily", "interval": 1 }
+  }'
+```
+</CodeGroup>
+
+---
+
+### `PATCH /api/recurrences/:id`
+
+Edits the series. Future untouched occurrences are rebuilt from the new rule. Completed, cancelled, and detached occurrences are left alone.
+
+**Request body** — all fields from `POST /api/recurrences`, all optional (including `rule`).
+
+**Response** — `{ recurrence: RecurrenceDTO }`.
+
+<Note>
+  "Future untouched" means `status = 'pending'` and `detached = false`. An occurrence the user moved by hand (`detached = true`) survives a series edit unchanged — their deliberate choice is respected.
+</Note>
+
+---
+
+### `DELETE /api/recurrences/:id`
+
+Stops the series. Future pending (untouched) occurrences are deleted. Completed and cancelled occurrences are kept — eight attended classes are still eight attended classes.
+
+**Response**
+
+```json
+{ "ok": true, "keptOccurrences": 8 }
+```
+
+---
+
+### `POST /api/recurrences/:id/detach/:commitmentId`
+
+"Change just this one" — marks a single occurrence as detached so it stops following the series. The occurrence becomes an independent commitment. Editing the series after this leaves the detached occurrence alone.
+
+**Response** — `{ ok: true }`.
+
+<CodeGroup>
+```bash detach-occurrence
+curl -X POST http://localhost:3002/api/recurrences/abc123/detach/def456 \
+  -H "Authorization: Bearer <token>"
+```
+</CodeGroup>
+
+---
+
+## RecurrenceRule reference
+
+```json
+{
+  "freq": "weekly",
+  "interval": 1,
+  "byWeekday": [2],
+  "byMonthDay": null,
+  "byMonth": null,
+  "setPos": null,
+  "until": null,
+  "count": null
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `freq` | `string` | `daily` \| `weekly` \| `monthly` \| `yearly` |
+| `interval` | `number` | Every N periods |
+| `byWeekday` | `number[]` | Days of week (0=Sun) |
+| `byMonthDay` | `number` | Day of month (1–31) |
+| `byMonth` | `number` | Month (0=Jan) |
+| `setPos` | `number` | 1–4 or -1 for "nth weekday of month" |
+| `until` | `string` | `YYYY-MM-DD` end date |
+| `count` | `number` | Maximum occurrences |
+
+**Common patterns:**
+
+| Human description | Rule |
+|---|---|
+| Every weekday | `{ freq: "weekly", interval: 1, byWeekday: [1,2,3,4,5] }` |
+| Every other Friday | `{ freq: "weekly", interval: 2, byWeekday: [5] }` |
+| First Monday of each month | `{ freq: "monthly", interval: 1, byWeekday: [1], setPos: 1 }` |
+| Last day of each month | `{ freq: "monthly", interval: 1, byMonthDay: -1 }` |
+| Every year on 15 Aug | `{ freq: "yearly", interval: 1, byMonth: 7, byMonthDay: 15 }` |

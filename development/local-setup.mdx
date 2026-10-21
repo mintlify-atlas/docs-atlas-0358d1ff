@@ -1,0 +1,163 @@
+---
+title: "Local Development Setup for Cue"
+sidebarTitle: "Local Setup"
+description: "Set up Cue for local development — Node 22, PostgreSQL 14+, concurrently running API and Vite dev server, with GPS and audio testing over LAN."
+---
+
+Cue is a monorepo (npm workspaces) with an API powered by Fastify and Drizzle, a React PWA built with Vite, and a shared package of pure-function logic used by both. Getting it running locally requires Node 22 and a locally installed PostgreSQL — no Docker.
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Node ≥ 22" icon="node-js">
+    Node's official Linux binaries require **glibc 2.34 or newer**. Amazon Linux 2 (glibc 2.26, EOL June 2026) cannot run them. Use Ubuntu 22.04+, Debian 12+, or Amazon Linux 2023.
+  </Card>
+  <Card title="PostgreSQL 14+" icon="database">
+    Tested against PostgreSQL 18 on port **5432**. No Docker needed — Cue uses your locally installed instance directly.
+  </Card>
+</CardGroup>
+
+<Warning>
+  On Linux, verify your glibc version with `ldd --version` before installing Node. A version older than 2.34 is not a packaging problem any alternate repository can fix — the dynamic loader itself refuses to load the binaries.
+</Warning>
+
+## Setup Steps
+
+<Steps>
+  <Step title="Install dependencies">
+    From the repo root, install all workspace packages in one command:
+
+    ```bash
+    npm install
+    ```
+  </Step>
+
+  <Step title="Create the database">
+    On **Windows**, `npm run db:setup` runs a PowerShell script that creates the `cue` role and database. It prompts for your PostgreSQL superuser password and writes nothing to disk:
+
+    ```bash
+    npm run db:setup
+    ```
+
+    On **macOS or Linux**, create the role and database by hand:
+
+    ```bash
+    sudo -u postgres psql \
+      -c "create role cue login password 'pick-a-password'" \
+      -c "create database cue owner cue"
+    ```
+  </Step>
+
+  <Step title="Create your .env file">
+    Copy the example file and set the minimum required values:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+    Open `.env` and set:
+
+    ```ini
+    DATABASE_URL=postgres://cue:pick-a-password@localhost:5432/cue
+    JWT_SECRET=<64 random characters>
+    VITE_API_URL=http://localhost:3002
+    ```
+
+    <Note>
+      `.env.example` already includes a pre-generated VAPID key pair. `VITE_API_URL` must be set to the API port (`3002`) in development. Leave it **blank** in production so the browser calls the same origin as the web app.
+    </Note>
+  </Step>
+
+  <Step title="Run migrations">
+    On a brand-new, empty database, lift the new-database guard once:
+
+    ```bash
+    CUE_NEW_DATABASE=1 npm run db:migrate
+    ```
+
+    <Warning>
+      `CUE_NEW_DATABASE=1` is **only for the very first run** on a fresh database. Every subsequent `db:migrate` — including deploys — must omit it. A database that lost its tables will stop a deploy instead of being silently rebuilt when the flag is absent.
+    </Warning>
+
+    After the first run, always use the plain command:
+
+    ```bash
+    npm run db:migrate
+    ```
+
+    <Note>
+      Do not use `npm run db:push`. `drizzle-kit push` is broken against PostgreSQL 18 — it emits an invalid `ALTER COLUMN … DROP NOT NULL` on primary keys, which Postgres rejects. The `migrations/` folder is the source of truth.
+    </Note>
+  </Step>
+
+  <Step title="Seed demo data">
+    Create a local demo tenant with a pre-built sample week:
+
+    ```bash
+    npm run seed
+    ```
+
+    This creates the account **`demo@cue.local`** / **`demo1234`** with a reminder that fires about one minute after seeding, so you can immediately verify the reminder engine is working.
+  </Step>
+
+  <Step title="Start the development servers">
+    Run the API and Vite dev server concurrently:
+
+    ```bash
+    npm run dev
+    ```
+
+    | Server | URL |
+    | --- | --- |
+    | API (Fastify + tsx watch) | `http://localhost:3002` |
+    | Web (Vite) | `http://localhost:5173` |
+
+    Both ports are configurable via `PORT` and `WEB_PORT` in `.env`.
+  </Step>
+</Steps>
+
+## Useful Commands
+
+| Command | What it does |
+| --- | --- |
+| `npm run db:studio` | Opens Drizzle Studio — a visual browser for the database |
+| `npm run typecheck` | Runs TypeScript type-checking across all workspaces |
+| `npm test` | Runs unit, web-script, and API test suites (see [Testing](/development/testing)) |
+| `npm run vapid` | Generates and prints a new VAPID key pair |
+| `npm run check:oauth` | Prints the OAuth redirect URIs the server will use — never secrets |
+
+## Testing from a Phone (GPS and Voice)
+
+Vite binds to `0.0.0.0`, so you can open `http://<your-lan-ip>:5173` from any phone on the same Wi-Fi network. However, browsers only grant geolocation and microphone access on a **secure context** (`https` or `localhost`). A plain LAN IP address is neither.
+
+<Tip>
+  Use a tunnel to get a real `https` URL for your local server:
+
+  ```bash
+  cloudflared tunnel --url http://localhost:5173
+  ```
+
+  Or use [ngrok](https://ngrok.com). Both give you a public `https` address that your phone will treat as secure.
+</Tip>
+
+The same secure-context requirement applies to **voice notes** — `getUserMedia` will be refused on a bare LAN IP.
+
+## Connectivity Notes
+
+<Note>
+  `navigator.onLine` is only a hint. It is honest about airplane mode but optimistic about captive portals — a hotel Wi-Fi login screen still reports `online`. Cue's offline outbox decides whether a sync succeeded based on whether the request actually completed, not on that flag.
+</Note>
+
+## VAPID Keys
+
+The `.env.example` ships with a pre-generated VAPID key pair so push notifications work out of the box in development. If you need fresh keys — for example, when setting up a new production environment — run:
+
+```bash
+npm run vapid
+```
+
+This prints both the public and private keys. Copy them into `.env` as `VAPID_PUBLIC_KEY` and `VAPID_PRIVATE_KEY`.
+
+<Warning>
+  Changing your VAPID keys **invalidates every existing push subscription**. Every device will stop receiving notifications until the user re-enables them. Generate keys once and keep them. The `/health` endpoint reports `"push": true` when VAPID is correctly configured.
+</Warning>

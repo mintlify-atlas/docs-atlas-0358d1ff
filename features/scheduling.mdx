@@ -1,0 +1,184 @@
+---
+title: "Conflict Detection, Free Slots, and the Daily Schedule"
+sidebarTitle: "Scheduling"
+description: "Cue checks time-slot clashes, travel-distance conflicts between places, and proposes genuinely free slots for overdue items — all without a mapping service."
+---
+
+Cue runs two independent conflict checks whenever you save a plan: one for time (do two fixed plans overlap?) and one for travel (is there enough time to get from one place to the other?). Neither check ever blocks you — every conflict offers choices. Nothing is written until you decide.
+
+## Slot blocking
+
+Every fixed commitment blocks a slot. The duration defaults by kind:
+
+| Kind | Default duration |
+|------|-----------------|
+| `callback` | 15 minutes |
+| `task` | 30 minutes |
+| `meeting` / `followup` | 60 minutes |
+
+Duration is adjustable per item using `for 45 min` in the capture sentence, or via the full form.
+
+<Note>
+  **All-day items and flexible items claim no slot.** A three-day trip should not conflict with every call you book while you are on it. A flexible `call the plumber sometime this afternoon` should not veto a real 3pm meeting.
+</Note>
+
+## Clash check on save
+
+Before a new commitment is written, `checkConflicts` queries everything still pending within a 12-hour window of the proposed time.
+
+**Conflicts are per person, not per company.** Two sales reps from the same company can both be busy at 4pm without that being a clash — the query is scoped to `userId`.
+
+### Touching edges don't clash
+
+```
+14:00 ──── 15:00   (existing meeting, 1 hour)
+            15:00 ──── 15:15  (new callback, 15 min)  ← NO CLASH
+```
+
+The overlap check is strict: `start < otherEnd && end > otherStart`. Two events that merely touch leave the boundary free.
+
+### The 409 response
+
+When a clash is found, the server returns `409 time_conflict` with the conflicting items and up to three free-time suggestions:
+
+```json
+HTTP/1.1 409 Conflict
+
+{
+  "error": "time_conflict",
+  "plan": { ... },
+  "conflicts": [
+    {
+      "id": "abc-...",
+      "title": "Team standup",
+      "dueAt": "2025-08-01T09:00:00.000Z",
+      "durationMinutes": 30
+    }
+  ],
+  "suggestions": [
+    "2025-08-01T09:45:00.000Z",
+    "2025-08-01T10:00:00.000Z",
+    "2025-08-01T10:15:00.000Z"
+  ]
+}
+```
+
+The client can present these suggestions and let you choose, move the existing plan (`POST /commitments/:id/reschedule`), or tick **Book both anyway** and re-send with `allowConflict: true`.
+
+### Opening guess vs explicit time
+
+**A clash with the form's opening guess informs; it does not block.** The capture form opens on tomorrow 10am by default. If that guess lands on an existing meeting, refusing to save would mean blocking a decision you have not made yet — you had typed nothing at all.
+
+The moment a preset, an exact time, or a parsed phrase sets the time explicitly, the clash blocks as before. The server re-checks on every save regardless, so nothing slips through.
+
+<CodeGroup>
+```json title="POST /commitments/:id/reschedule"
+{
+  "dueAt": "2025-08-01T10:30:00.000Z"
+}
+```
+
+```json title="Response (200 OK)"
+{
+  "id": "abc-...",
+  "dueAt": "2025-08-01T10:30:00.000Z",
+  "conflicts": [],
+  "suggestions": []
+}
+```
+</CodeGroup>
+
+## Travel conflict (with coordinates)
+
+When two fixed plans in different places have a gap too small to travel between them, Cue calculates whether the journey is feasible.
+
+**Estimation method, not routing:**
+
+```
+travel_hours = straight_line_km × 1.35 ÷ TRAVEL_SPEED_KMH + 0.5
+```
+
+- The `1.35` multiplier accounts for roads not being straight lines
+- `TRAVEL_SPEED_KMH` defaults to 45 km/h
+- The 0.5-hour overhead covers leaving, parking, and arriving
+
+The UI says *"estimated, not a routed journey"* rather than implying precision nobody has. A maps provider is an upgrade, not a prerequisite.
+
+**Under 25 km apart is the same town** — no travel warning is shown.
+
+An event that already overlaps in time is reported by the time check and skipped by the travel check, so you never see both warnings for the same pair.
+
+<Warning>
+  Nothing is ever blocked. Every location conflict offers choices — **Keep both / Move this one / Adjust the trip / Mark tentative** — and says so explicitly. The app notices; you decide.
+</Warning>
+
+## Trip conflict (no coordinates needed)
+
+If you have said you will be in Mathura on the 13th and something lands in Jaipur, that is worth mentioning regardless of how far apart they are. This check requires no coordinates — it works from the trip's `placeLabel` alone.
+
+Severity comes from the trip's own strictness:
+
+| Strictness | Warning level |
+|-----------|--------------|
+| `strict` | Impractical |
+| `flexible` | Tight |
+| `tentative` | Worth a look |
+
+## Free slots (`services/freeSlots.ts`)
+
+One shared implementation answers "when is this person actually free?" for three different screens: the triage panel, the Plan Tomorrow feature, and overdue card reschedules.
+
+<Accordion title="Rules the free-slot finder follows">
+  - **All-day and flexible items claim nothing.** Same rule as the clash check.
+  - **The item being moved does not block itself.** Its own old slot would otherwise rule out the best answer.
+  - **Offers are spread apart.** After a slot is found, a 1-hour buffer is added to `claimed` — three slots half an hour apart on the same afternoon is one choice presented three times.
+  - **A window asked for but unavailable does not mean no answer.** It offers times outside the window and says that is what it has done.
+  - **Fewer, not worse.** Nothing free for a fortnight is a real answer and is returned as one.
+  - **Working hours only.** Slots are searched between 9:00 and 19:00, in 30-minute steps. Offering 3am is a free slot and no help.
+</Accordion>
+
+```typescript title="Finding 3 free slots for a 45-minute plan"
+const slots = await findFreeSlots(userId, 45, 3, {
+  excludeId: currentCommitmentId,
+  window: 'afternoon',       // optional: keep inside a preferred window
+  horizonDays: 14,
+  perDay: 2,                  // at most 2 offers per day
+})
+// Returns: [Date, Date, Date] — up to 3 genuinely free times
+```
+
+## Plan Tomorrow
+
+Once a day in the evening, a nudge offers to place loose items into real gaps in tomorrow's schedule. The placement reasoning is shown next to each item, and nothing is written until you accept:
+
+> **Tomorrow is 25% booked**  
+> 3 things have no time on them. I found slots for all of them, starting 9:55 am.
+
+Placement rules:
+- The stated window (`this afternoon`) is honoured
+- The longest item goes first — filling the day with quick wins strands the three-hour task
+- Placing an item **splits the gap around it** rather than truncating the front, so an afternoon task placed at noon does not destroy the entire morning
+- A flexible item that already slipped is picked up too — a task from last week is exactly what wants a slot tomorrow
+- Nothing it cannot fit is dropped silently
+
+## Place suggestion
+
+`GET /places/:id/suggestion` returns a prediction of what will happen on your next visit to a saved place, with no model:
+
+- **Contact** — who you deal with here most often (not just whoever you saw last)
+- **Outcome** — the most common outcome at this place
+- **Follow-up gap** — the median across past visits
+- **Time of day** — carried from the last follow-up
+
+Confidence is `strong` only with two or more prior visits *and* a follow-up to copy. Below that the suggestion card is hidden rather than guessing.
+
+## Business lookup
+
+`POST /places/lookup` answers "what businesses are at these coordinates?" from an external provider. Results are suggestions only — nothing is written until you pick one and save the visit.
+
+| Provider | Setup | Coverage |
+|----------|-------|---------|
+| OpenStreetMap (Overpass) | None, works out of the box | Good for hospitals and chains |
+| Google Places | `GOOGLE_PLACES_API_KEY` in env | Much better for small practices |
+
+Set `PLACE_LOOKUP_PROVIDER=none` to turn suggestions off entirely. Results are cached for 10 minutes per rounded coordinate — GPS jitter would otherwise fire a request per reading.

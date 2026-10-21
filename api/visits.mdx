@@ -1,0 +1,197 @@
+---
+title: "Visits API — Log In-Person and Virtual Meetings"
+sidebarTitle: "Visits"
+description: "POST /api/visits logs a meeting or interaction, creating contacts and commitments inline. Includes idempotent clientId for offline outbox sync."
+---
+
+Visits (stored internally as `interactions`) record every meeting, phone call, or in-person visit. The defining feature of the log-visit flow is that a new contact and a follow-up commitment can be created in the same transaction as the visit itself — a phone number captured in the field is the most perishable thing in this flow, so it is never left as free text to be re-entered later. Commitments linked to a visit survive even if the visit is deleted, because a promise you made does not stop existing because you deleted the note about the meeting.
+
+## Endpoints
+
+### `GET /api/visits`
+
+Returns the 100 most recent visits for the authenticated user, ordered by `startedAt` descending.
+
+**Response** — array of `VisitDTO`:
+
+<ResponseField name="id" type="string">UUID of the visit.</ResponseField>
+<ResponseField name="placeId" type="string | null">Linked saved place, if any.</ResponseField>
+<ResponseField name="placeName" type="string | null">Name of the linked place.</ResponseField>
+<ResponseField name="purpose" type="string">One of `business`, `personal`, `unknown`.</ResponseField>
+<ResponseField name="contactId" type="string | null">Linked contact UUID, if any.</ResponseField>
+<ResponseField name="contactName" type="string | null">Contact name (linked record wins; free-text fallback for older visits).</ResponseField>
+<ResponseField name="contactPhone" type="string | null">Contact's phone number, for one-tap calling.</ResponseField>
+<ResponseField name="outcome" type="string | null">Free-text outcome, e.g. `"Went well"`, `"Rescheduled"`.</ResponseField>
+<ResponseField name="notes" type="string | null">Notes from the visit.</ResponseField>
+<ResponseField name="lat" type="number | null">GPS latitude at capture time.</ResponseField>
+<ResponseField name="lng" type="number | null">GPS longitude at capture time.</ResponseField>
+<ResponseField name="startedAt" type="string">ISO 8601 — when the visit began.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601 — when the record was created.</ResponseField>
+
+---
+
+### `GET /api/visits/:id`
+
+Returns a single visit plus every commitment it created.
+
+**Response** — `VisitDTO` with an additional `commitments` array, each item containing `id`, `title`, `kind`, `dueAt`, `durationMinutes`, `status`, `escalationCount`, `placeId`, `placeName`, `contactId`, `contactName`, `contactPhone`, `notes`, and `createdAt`.
+
+---
+
+### `POST /api/visits`
+
+Logs a visit. Place creation, contact upsert, the interaction record, the follow-up commitment, and its first reminder all share one database transaction — a visit can never be recorded without the follow-up it promised.
+
+**Idempotency:** if `clientId` is provided and a visit with that ID already exists for this user, the existing record is returned with `replayed: true`. No duplicate is created. Check for this before the conflict guard too — a retry would otherwise report a clash with the copy it created itself.
+
+**Request body**
+
+<ParamField body="clientId" type="string">
+  UUID generated once on the device at capture time. Makes the write idempotent — a queued visit replayed after a dropped connection lands on the same row. If already seen, returns the existing visit with `replayed: true`.
+</ParamField>
+
+<ParamField body="purpose" type="string" required>
+  One of `business`, `personal`, `unknown`.
+</ParamField>
+
+<ParamField body="placeId" type="string">
+  UUID of a saved place. Omit for phone calls, video meetings, or tasks that have no location.
+</ParamField>
+
+<ParamField body="newPlace" type="object">
+  Create a new place inline. Provide `name`, `lat`, `lng`, and optionally `address`, `phone`, `kind`.
+</ParamField>
+
+<ParamField body="contactId" type="string">
+  UUID of an existing contact. Mutually exclusive with `newContact`.
+</ParamField>
+
+<ParamField body="newContact" type="object">
+  Create or fill-in a contact inline. Fields: `name` (required), `role`, `phone`.
+
+  If a contact with the same name (case-insensitive) already exists, their record is reused and any gaps (missing role, phone, or placeId) are filled in. Existing detail is never overwritten — what was recorded deliberately is kept.
+</ParamField>
+
+<ParamField body="contactName" type="string">
+  Free-text fallback when neither `contactId` nor `newContact` is used.
+</ParamField>
+
+<ParamField body="outcome" type="string">
+  Short outcome note, e.g. `"Did not happen"`, `"Waiting on them"`.
+</ParamField>
+
+<ParamField body="notes" type="string">
+  Up to 4000 characters of visit notes.
+</ParamField>
+
+<ParamField body="lat" type="number">GPS latitude at capture.</ParamField>
+<ParamField body="lng" type="number">GPS longitude at capture.</ParamField>
+<ParamField body="accuracyM" type="number">GPS accuracy in metres.</ParamField>
+
+<ParamField body="startedAt" type="string">
+  ISO 8601 datetime — when the visit began. Defaults to `now` if omitted.
+</ParamField>
+
+<ParamField body="commitment" type="object">
+  The follow-up plan this visit committed to. If provided, a `commitments` row is created in the same transaction and its first reminder is scheduled.
+
+  <Expandable title="commitment fields">
+    <ParamField body="commitment.title" type="string" required>What was promised. 1–300 chars.</ParamField>
+    <ParamField body="commitment.kind" type="string" default="followup">One of `callback`, `meeting`, `task`, `followup`.</ParamField>
+    <ParamField body="commitment.dueAt" type="string" required>ISO 8601 datetime.</ParamField>
+    <ParamField body="commitment.durationMinutes" type="number">Defaults to the kind's standard duration.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="voiceNoteIds" type="string[]">
+  UUIDs of voice notes recorded during the visit (uploaded separately). Attached to the interaction in the same transaction.
+</ParamField>
+
+<ParamField body="allowConflict" type="boolean">
+  Set `true` to bypass the follow-up commitment's clash check after the user confirms the double-booking.
+</ParamField>
+
+**Responses**
+
+`201` — `{ interaction: VisitDTO, commitment: CommitmentDTO | null }`
+
+`200` with `replayed: true` — returned when `clientId` already exists; no duplicate created.
+
+`409 time_conflict` — the follow-up commitment's slot is taken. Same shape as the commitments endpoint.
+
+<CodeGroup>
+```bash log-visit
+curl -X POST http://localhost:3002/api/visits \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientId": "550e8400-e29b-41d4-a716-446655440001",
+    "purpose": "business",
+    "newContact": { "name": "Dr. Sharma", "role": "Physician", "phone": "+91 98765 43210" },
+    "outcome": "Went well",
+    "commitment": {
+      "title": "Follow up after blood test",
+      "kind": "followup",
+      "dueAt": "2026-10-22T11:00:00+05:30"
+    }
+  }'
+```
+
+```bash offline-outbox-replay
+# Replay the same visit after coming back online — returns existing record
+curl -X POST http://localhost:3002/api/visits \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "clientId": "550e8400-e29b-41d4-a716-446655440001",
+    "purpose": "business",
+    "newContact": { "name": "Dr. Sharma", "role": "Physician" },
+    "outcome": "Went well"
+  }'
+```
+</CodeGroup>
+
+<Tip>
+  **Offline outbox pattern:** generate a `clientId` (UUID v4) at capture time and store it with the queued visit. When the device reconnects, replay the request unchanged. The server returns the original visit on the first successful delivery and every retry thereafter.
+</Tip>
+
+---
+
+### `PATCH /api/visits/:id`
+
+Updates a visit record. Only the fields you provide change.
+
+**Request body** — all fields optional:
+
+<ParamField body="placeId" type="string">Link to a different saved place.</ParamField>
+<ParamField body="contactId" type="string">Link to a different contact.</ParamField>
+<ParamField body="purpose" type="string">One of `business`, `personal`, `unknown`.</ParamField>
+<ParamField body="contactName" type="string">Free-text contact name override.</ParamField>
+<ParamField body="outcome" type="string">Update the outcome.</ParamField>
+<ParamField body="notes" type="string">Update the notes.</ParamField>
+<ParamField body="startedAt" type="string">ISO 8601 — correct when the visit was logged.</ParamField>
+
+**Response** — the updated `VisitDTO`.
+
+---
+
+### `DELETE /api/visits/:id`
+
+Deletes the visit record. Commitments it created survive with a null `interactionId` — the promises outlive the note about the meeting.
+
+**Response**
+
+```json
+{ "ok": true }
+```
+
+---
+
+## Contact creation during visit logging
+
+When `newContact` is provided, the server checks for an existing contact with a matching name (case-insensitive) before inserting:
+
+- **Match found:** gaps are filled (`role`, `phone`, `placeId` — only blank fields). Existing detail is never overwritten.
+- **No match:** a new contact row is inserted with the provided name, role, and phone.
+
+This means logging two visits with the same person never creates two contacts, each half-filled.

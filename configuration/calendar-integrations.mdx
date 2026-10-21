@@ -1,0 +1,199 @@
+---
+title: "Set Up Google and Microsoft Calendar Integration"
+sidebarTitle: "Calendar Integrations"
+description: "Connect Google Calendar and Microsoft Outlook via OAuth to mirror events read-only into Cue, with fallback support for iCal secret URLs and .ics file uploads."
+---
+
+Cue mirrors external calendars so your plans, travel-time checks, and conflict detection have the full picture of what your day holds. All mirrored events are **read-only** — Cue never writes back to Google, Microsoft, or any calendar source. A bad sync can show a stale meeting, but it can never touch what your colleagues see.
+
+## Three ways to import a calendar
+
+<CardGroup cols={3}>
+  <Card title="OAuth Connect" icon="link">
+    Connect your Google or Microsoft account directly. Always fresh — the API answers immediately. This is the recommended route.
+  </Card>
+  <Card title="Secret iCal URL" icon="key">
+    Paste the private iCal link from Google or Outlook settings. Works without any server-side OAuth setup, but Google's feed can lag hours behind.
+  </Card>
+  <Card title=".ics File Upload" icon="file">
+    Export a `.ics` file and upload it. Works on managed accounts where the secret URL is hidden or unavailable. Updates only when you re-upload.
+  </Card>
+</CardGroup>
+
+Cue applies the same deduplication, conflict detection, and reminder logic to all three sources. The only difference is how events arrive.
+
+---
+
+## Google Calendar
+
+### What it requires
+
+- A free OAuth client in the Google Cloud Console (no billing, no API fees)
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`
+- `ENCRYPTION_KEY` in `.env` (tokens are stored encrypted at rest with AES-256-GCM)
+
+### Creating the OAuth client
+
+<Steps>
+  <Step title="Open the Google Cloud Console">
+    Go to [console.cloud.google.com](https://console.cloud.google.com). Create a new project or select an existing one.
+  </Step>
+  <Step title="Enable the Google Calendar API">
+    Navigate to **APIs & Services → Library**, search for **Google Calendar API**, and click **Enable**.
+  </Step>
+  <Step title="Create an OAuth client ID">
+    Go to **APIs & Services → Credentials → Create credentials → OAuth client ID**. Choose **Web application** as the application type.
+  </Step>
+  <Step title="Add the redirect URI">
+    Under **Authorised redirect URIs**, add the exact URI for your environment:
+
+    ```
+    http://localhost:3002/api/oauth/google/callback
+    ```
+
+    In production, replace `http://localhost:3002` with your real domain and use `https`. Google compares the full string — a wrong scheme, missing port, or extra slash will fail at the consent screen with a message that does not say which end is wrong.
+  </Step>
+  <Step title="Copy the credentials into .env">
+    ```dotenv
+    GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
+    GOOGLE_CLIENT_SECRET=GOCSPX-your-secret
+    ENCRYPTION_KEY=64-hex-characters-from-openssl-rand-hex-32
+    ```
+  </Step>
+</Steps>
+
+### Scopes requested
+
+Cue requests exactly one scope: `https://www.googleapis.com/auth/calendar.readonly`. No write permission is ever requested or used. The consent screen says **View your calendars** and nothing else.
+
+### Testing mode
+
+While the OAuth consent screen is in **Testing** (the default for a new project), only accounts you have explicitly added as test users can connect. If your own sign-in is refused with a vague error, check **OAuth consent screen → Test users** and add your Google account there.
+
+Publishing the consent screen for other people requires Google's verification process — a privacy policy, a homepage, a demo video, and a review. Know this before promising Google Calendar integration to users on a public deployment.
+
+### How the redirect URI is derived
+
+Cue derives the redirect URI automatically so you normally do not need to set `GOOGLE_REDIRECT_URI`:
+
+- **Development:** uses `VITE_API_URL` (`http://localhost:3002`) → `http://localhost:3002/api/oauth/google/callback`
+- **Production:** uses `WEB_ORIGIN` → `https://your-domain.com/api/oauth/google/callback`
+
+Only set `GOOGLE_REDIRECT_URI` explicitly if the derived URI does not match what you have registered.
+
+<Warning>
+  **`VITE_API_URL` must be blank in production.** If the development value (`http://localhost:3002`) is left in `.env`, every OAuth redirect goes back to `localhost` — and because the provider obeys the redirect the app sends, registering the correct production URI does not save you. See [Environment Variables](/configuration/environment#frontend) for details.
+</Warning>
+
+### Why use OAuth instead of the secret iCal URL?
+
+**Freshness.** Google regenerates the iCal feed slowly — often hours behind, occasionally a day. The Calendar API answers immediately. For anything booked in the last few hours, the OAuth path is the only reliable option.
+
+**Availability.** A Google Workspace administrator can disable the secret iCal address entirely. OAuth is unaffected.
+
+---
+
+## Microsoft / Outlook Calendar
+
+### What it requires
+
+- A free App registration in Microsoft Entra ID (no billing, no API fees)
+- `MICROSOFT_CLIENT_ID` and `MICROSOFT_CLIENT_SECRET` in `.env`
+- `ENCRYPTION_KEY` in `.env`
+
+### Creating the App registration
+
+<Steps>
+  <Step title="Open the Azure portal">
+    Go to [portal.azure.com](https://portal.azure.com) and sign in with your Microsoft account.
+  </Step>
+  <Step title="Create an App registration">
+    Navigate to **Microsoft Entra ID → App registrations → New registration**. Choose any display name. Under **Supported account types**, choose based on your intended audience (see `MICROSOFT_TENANT` below). Under **Redirect URI**, select **Web** and enter:
+
+    ```
+    http://localhost:3002/api/oauth/microsoft/callback
+    ```
+
+    In production, use your real `https` domain.
+  </Step>
+  <Step title="Add a client secret">
+    Go to **Certificates & secrets → New client secret**. Give it a description and choose an expiry. Copy the **Value** immediately — it is only shown once.
+  </Step>
+  <Step title="Add the required API permission">
+    Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions**. Add `Calendars.Read`. No admin consent is needed for this delegated scope.
+  </Step>
+  <Step title="Copy the credentials into .env">
+    ```dotenv
+    MICROSOFT_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    MICROSOFT_CLIENT_SECRET=your-secret-value
+    MICROSOFT_TENANT=common
+    ENCRYPTION_KEY=64-hex-characters
+    ```
+  </Step>
+</Steps>
+
+### The `offline_access` scope
+
+<Warning>
+  Cue includes `offline_access` in the Microsoft OAuth scope list. This is not optional — it is how Microsoft grants a refresh token. Unlike Google (which uses `access_type=offline`), Microsoft does not have an `access_type` parameter. Without `offline_access`, the connection works for one hour and then stops silently. Cue handles this automatically; you do not need to add it manually.
+</Warning>
+
+### Disconnecting Microsoft accounts
+
+<Warning>
+  **Microsoft has no OAuth revocation endpoint.** When a user disconnects their Microsoft account in Cue, the stored tokens are deleted from Cue's database. However, the granted permission still exists on the Microsoft side. The app tells users exactly where to complete the revocation: [myapps.microsoft.com](https://myapps.microsoft.com). Pretending the permission had been withdrawn would be inaccurate.
+</Warning>
+
+### Tenant configuration
+
+`MICROSOFT_TENANT` controls which types of accounts may connect:
+
+| Value | Allowed accounts |
+|---|---|
+| `common` (default) | Work/school accounts and personal Microsoft accounts |
+| `organizations` | Work and school accounts only |
+| `<tenant id>` | A single organisation's accounts only |
+
+The default is `common` — a planner is a personal tool even when the calendar is not.
+
+---
+
+## iCal URL and File Upload
+
+### Finding a Google Calendar secret address
+
+In Google Calendar, go to **Settings → Settings for my calendars → [your calendar] → Integrate calendar → Secret address in iCal format**. This URL gives read-only access to the calendar without requiring OAuth.
+
+<Note>
+  **Google's iCal feed can lag hours behind the API.** The secret address is fine for seeing your general schedule, but events booked in the last few hours may not appear until the next feed regeneration. Use OAuth Connect for time-sensitive integrations.
+</Note>
+
+### File upload for managed accounts
+
+Google Workspace administrators can disable external sharing of calendar feeds entirely, removing the secret address from the UI. On a managed work account there may be no link to copy at all. In that case, export the calendar manually:
+
+1. Go to **Google Calendar Settings → Import & export → Export**
+2. Download the `.zip` file — it contains one `.ics` file per calendar
+3. Upload the relevant `.ics` file in Cue's **Calendars** settings
+
+<Warning>
+  **File-sourced calendars are not re-synced automatically.** A `.ics` file is a snapshot of your calendar at the moment it was exported. The scheduled sync worker skips file-sourced calendars rather than failing every 30 minutes against a static file. To update, export a fresh `.ics` and use **Replace file** in calendar settings. Re-uploading updates in place using the event UID as the deduplication key — no duplicates are created.
+</Warning>
+
+### Both routes, same rules
+
+Whether events arrive via OAuth, a secret URL, or a file upload, they go through the same parser, deduplication logic, and reminder handling. A fix in one import path is a fix in all three. Re-reading via OAuth or URL is an update rather than a pile of duplicates because every event carries a stable UID that is used as the deduplication key.
+
+---
+
+## What happens to mirrored events
+
+Mirrored calendar events have a few behaviours that differ from plans you create directly in Cue:
+
+- **Read-only.** Cue never writes back to any calendar source.
+- **Announced once.** Events from subscribed calendars send one notification ("starting now") only if the calendar feed has reminders enabled. They are never chased with escalating re-notifications.
+- **Context, not tasks.** All-day events (public holidays, out-of-office) appear under **From your calendar** — they have no Done button and are not counted as overdue.
+- **Deleting is narrow.** An event that vanishes from the feed is only removed from Cue if it is still in the future, still pending, and you have not edited it locally. Nothing you have modified by hand is ever touched by a sync.
+- **Disconnecting removes what it brought in.** Removing a calendar feed or disconnecting an account removes the mirrored events and nothing else. Your own plans are never affected.
+
+Feeds are re-read every 30 minutes. You can force an immediate sync with **Read now** in calendar settings.

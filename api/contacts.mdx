@@ -1,0 +1,230 @@
+---
+title: "Contacts API — People, Roles, and Phone Numbers"
+sidebarTitle: "Contacts"
+description: "CRUD for contacts — name, role, phone, email, notes, and associated place. Supports import from device via Contacts Picker API and disambiguation when names are ambiguous."
+---
+
+Contacts are the people you meet, call, and follow up with. Each contact can be linked to a saved place (their clinic, company, or office), given a role, a phone number, and an optional keep-in-touch cadence so Cue will prompt you when it has been too long. Deleting a contact never erases the visits or commitments that referenced them — the history of what happened stays intact with a null `contactId`.
+
+<Note>
+  Contacts are also created inline during visit logging. When you log a visit with a new person's name, Cue creates or fills-in a contact record in the same transaction so their phone number is never lost to free text.
+</Note>
+
+## Endpoints
+
+### `GET /api/contacts`
+
+Returns all contacts for the current org, ordered by name, with visit counts.
+
+**Response** — array of `ContactDTO`:
+
+<ResponseField name="id" type="string">UUID.</ResponseField>
+<ResponseField name="name" type="string">Full name.</ResponseField>
+<ResponseField name="role" type="string | null">Their role, e.g. `"Physician"`, `"Site Engineer"`.</ResponseField>
+<ResponseField name="organization" type="string | null">
+  Where they work — a clinic, a company. Free text; organisation names are canonicalised so `"mehta physio clinic "` resolves to the same string as `"Mehta Physio Clinic"`.
+</ResponseField>
+<ResponseField name="keepInTouchDays" type="number | null">
+  How many days you are happy to go without contact. `null` means not tracked.
+</ResponseField>
+<ResponseField name="birthday" type="string | null">`MM-DD` — no year stored.</ResponseField>
+<ResponseField name="anniversary" type="string | null">`MM-DD` — no year stored.</ResponseField>
+<ResponseField name="phone" type="string | null">Phone number.</ResponseField>
+<ResponseField name="email" type="string | null">Email address.</ResponseField>
+<ResponseField name="notes" type="string | null">Free-text notes.</ResponseField>
+<ResponseField name="placeId" type="string | null">UUID of the linked saved place.</ResponseField>
+<ResponseField name="placeName" type="string | null">Name of the linked place.</ResponseField>
+<ResponseField name="visitCount" type="number">In-person visit count.</ResponseField>
+<ResponseField name="lastSeenAt" type="string | null">ISO 8601 — when they were last visited in person.</ResponseField>
+<ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+
+---
+
+### `GET /api/contacts/:id`
+
+Returns a single contact with their full history: visits, open commitments, and visit count.
+
+**Response** — `ContactDTO` extended with:
+
+<ResponseField name="visits" type="object[]">
+  Up to 50 recent visits, each with `id`, `purpose`, `outcome`, `notes`, `startedAt`.
+</ResponseField>
+<ResponseField name="commitments" type="object[]">
+  Up to 50 non-deleted commitments linked to this contact, each with `id`, `title`, `dueAt`, `status`.
+</ResponseField>
+
+---
+
+### `POST /api/contacts`
+
+Creates a new contact.
+
+**Request body**
+
+<ParamField body="name" type="string" required>
+  Full name. 1–200 characters.
+</ParamField>
+
+<ParamField body="role" type="string">
+  Their role or job title. Up to 120 characters. Blank strings are stored as `null`.
+</ParamField>
+
+<ParamField body="organization" type="string">
+  Where they work. Up to 200 characters. The value is canonicalised against existing organisation names and place names so that `"ABC Clinic"` and `"abc clinic "` stay one workplace.
+</ParamField>
+
+<ParamField body="phone" type="string">
+  Phone number. Up to 40 characters.
+</ParamField>
+
+<ParamField body="email" type="string">
+  Email address. Up to 200 characters.
+</ParamField>
+
+<ParamField body="placeId" type="string">
+  UUID of the saved place where this person works.
+</ParamField>
+
+<ParamField body="notes" type="string">
+  Free-text notes. Up to 4000 characters.
+</ParamField>
+
+<ParamField body="keepInTouchDays" type="number">
+  Set a keep-in-touch cadence (1–366 days). Once set, Cue will prompt you when you are overdue. Setting it starts the clock; clearing it (`null`) is a fresh start.
+</ParamField>
+
+<ParamField body="birthday" type="string">
+  `MM-DD` format — no year.
+</ParamField>
+
+<ParamField body="anniversary" type="string">
+  `MM-DD` format — no year.
+</ParamField>
+
+**Response** — `201` with the created `ContactDTO`.
+
+<CodeGroup>
+```bash create-contact
+curl -X POST http://localhost:3002/api/contacts \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Dr. Mehta",
+    "role": "Orthopaedic Surgeon",
+    "organization": "Mehta Ortho Clinic",
+    "phone": "+91 98765 43210",
+    "keepInTouchDays": 90
+  }'
+```
+</CodeGroup>
+
+---
+
+### `PATCH /api/contacts/:id`
+
+Partial update. Only fields present in the body change.
+
+**Request body** — all fields from `POST /api/contacts`, all optional.
+
+<Note>
+  When you change `keepInTouchDays`:
+  - Setting it for the first time starts the clock at `now`.
+  - Changing the value (e.g. 30 → 90 days) keeps the existing clock.
+  - Setting it to `null` stops tracking and clears the clock, so starting again later is treated as a fresh start.
+</Note>
+
+**Response** — the updated `ContactDTO`.
+
+---
+
+### `DELETE /api/contacts/:id`
+
+Deletes the contact record. Visits and commitments referencing this person survive with a null `contactId` — their history does not disappear from the record.
+
+**Response**
+
+```json
+{ "ok": true }
+```
+
+---
+
+### `POST /api/contacts/import`
+
+Imports contacts from the device's native Contacts Picker (available in Android Chrome and Edge). The server matches each incoming contact against existing records by name (case-insensitive) and only adds detail it does not yet have.
+
+<Warning>
+  This endpoint only ever fills gaps. An existing phone number or email is never overwritten by an import — what was recorded deliberately is kept, even if the phone's version is different.
+</Warning>
+
+**Request body**
+
+<ParamField body="contacts" type="object[]" required>
+  Array of up to 200 contacts from the device Contacts Picker API.
+
+  <Expandable title="contact fields">
+    <ParamField body="contacts[].name" type="string" required>Full name. 1–200 characters.</ParamField>
+    <ParamField body="contacts[].phone" type="string">Phone number.</ParamField>
+    <ParamField body="contacts[].email" type="string">Email address.</ParamField>
+  </Expandable>
+</ParamField>
+
+**Response**
+
+<ResponseField name="added" type="number">
+  Contacts that did not exist in Cue and were created fresh.
+</ResponseField>
+
+<ResponseField name="updated" type="number">
+  Contacts that already existed and had at least one gap filled in (phone or email).
+</ResponseField>
+
+<ResponseField name="unchanged" type="number">
+  Contacts that already existed and had nothing new to add.
+</ResponseField>
+
+<CodeGroup>
+```bash import-contacts
+curl -X POST http://localhost:3002/api/contacts/import \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contacts": [
+      { "name": "Ravi Kumar", "phone": "+91 98100 00001" },
+      { "name": "Priya Singh", "phone": "+91 98100 00002", "email": "priya@example.com" }
+    ]
+  }'
+```
+
+```json import-response
+{ "added": 1, "updated": 1, "unchanged": 0 }
+```
+</CodeGroup>
+
+---
+
+### `POST /api/contacts/:id/touched`
+
+Records a "talked today" event — contact that happened outside Cue (a call, a chat) — so the keep-in-touch clock resets without needing a full visit log. Clears any snooze.
+
+**Response** — `{ ok: true }`
+
+---
+
+### `POST /api/contacts/:id/touch-later`
+
+Snoozes the keep-in-touch prompt for this person without pretending you have talked to them. The clock does not reset — the overdue date is pushed forward.
+
+**Request body**
+
+<ParamField body="days" type="number" default="7">
+  How many days to snooze. 1–90.
+</ParamField>
+
+**Response** — `{ ok: true }`
+
+---
+
+## Organisation name canonicalisation
+
+When you create or update a contact's `organization`, the server checks existing contacts and saved places for a case-insensitive match. If `"ABC Clinic"` already exists as a place name, and you type `"abc clinic"`, they become the same organisation. This keeps the people at a workplace findable under one spelling.

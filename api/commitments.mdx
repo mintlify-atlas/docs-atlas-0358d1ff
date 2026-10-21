@@ -1,0 +1,344 @@
+---
+title: "Commitments API — Plans, Follow-Ups, and Reminders"
+sidebarTitle: "Commitments"
+description: "CRUD for commitments — plans with due times, durations, statuses, and reminder chains. Includes clash detection, reschedule, and the range endpoint for calendar grids."
+---
+
+Commitments are the core record in Cue — the thing you promised to do next. Each commitment has a due time, a duration, and a status that moves through `pending` → `done` / `cancelled` / `deleted`. The reminder engine works directly against these rows, firing a chain of notifications at `dueAt` and escalating until the item is closed. Every write re-runs clash detection so that two fixed items can never claim the same slot.
+
+## Endpoints
+
+### `GET /api/commitments/agenda`
+
+Returns the full Today screen in one call. Commitments are split into buckets based on their position relative to `now` and the window you supply.
+
+**Query parameters**
+
+<ParamField query="from" type="string" required>
+  ISO 8601 datetime — the start of the current day window (local midnight, supplied by the client which knows its timezone).
+</ParamField>
+
+<ParamField query="to" type="string" required>
+  ISO 8601 datetime — the end of the current day window (local midnight of the next day).
+</ParamField>
+
+**Response**
+
+<ResponseField name="overdue" type="CommitmentDTO[]">
+  Pending items whose `dueAt` is before `now`. No lower bound — a commitment dropped three weeks ago is still here.
+</ResponseField>
+
+<ResponseField name="today" type="CommitmentDTO[]">
+  Pending items due between `now` and `to`.
+</ResponseField>
+
+<ResponseField name="upcoming" type="CommitmentDTO[]">
+  Next 20 pending items due after `to`.
+</ResponseField>
+
+<ResponseField name="doneToday" type="CommitmentDTO[]">
+  Items completed or cancelled within the current day window.
+</ResponseField>
+
+<ResponseField name="justFinished" type="CommitmentDTO[]">
+  Meetings that ended recently and are awaiting a wrap-up ("any follow-ups?").
+</ResponseField>
+
+<ResponseField name="waiting" type="CommitmentDTO[]">
+  Items with a `waitingOn` value — things someone else owes you.
+</ResponseField>
+
+<ResponseField name="focus" type="object">
+  Active focus block (if one is running) plus the count of items currently held back by it.
+</ResponseField>
+
+---
+
+### `GET /api/commitments/range`
+
+Returns every commitment that overlaps a date range. Used by calendar grid views which need every item in their window, unlike the agenda which deliberately caps what is shown ahead.
+
+<Note>
+  Cancelled items are included (shown struck-through so the slot is visibly free and why). Only `deleted` items are hidden.
+</Note>
+
+**Query parameters**
+
+<ParamField query="from" type="string" required>
+  ISO 8601 datetime — start of the range.
+</ParamField>
+
+<ParamField query="to" type="string" required>
+  ISO 8601 datetime — end of the range. Multi-day items are included if any part of them falls within the window.
+</ParamField>
+
+**Response**
+
+<ResponseField name="commitments" type="CommitmentDTO[]">
+  All non-deleted commitments overlapping the range, ordered by `dueAt`.
+</ResponseField>
+
+<ResponseField name="trips" type="Trip[]">
+  Trip spans covering any part of the range. Trips are the strongest indicator that a day is spoken for; omitting them from the grid would make the grid wrong.
+</ResponseField>
+
+<CodeGroup>
+```bash range-example
+curl "http://localhost:3002/api/commitments/range?from=2026-10-01T00:00:00%2B05:30&to=2026-10-31T23:59:59%2B05:30" \
+  -H "Authorization: Bearer <token>"
+```
+</CodeGroup>
+
+---
+
+### `POST /api/commitments`
+
+Creates a new commitment. Clash detection runs before the write; a `fixed` item that overlaps an existing slot returns `409` instead of saving.
+
+<Note>
+  All-day items and `flexible` items never claim a slot, so they skip clash detection entirely.
+</Note>
+
+**Request body**
+
+<ParamField body="title" type="string" required>
+  What the commitment is. 1–300 characters.
+</ParamField>
+
+<ParamField body="dueAt" type="string" required>
+  ISO 8601 datetime with timezone offset, e.g. `"2026-10-15T10:00:00+05:30"`.
+</ParamField>
+
+<ParamField body="kind" type="string" default="task">
+  One of `callback`, `meeting`, `task`, `followup`, `focus`. Determines the default duration when `durationMinutes` is omitted.
+</ParamField>
+
+<ParamField body="durationMinutes" type="number">
+  How long this blocks out. Defaults: `callback` → 15 min, `meeting` → 60 min, `task` → 30 min, `followup` → 15 min, `focus` → 90 min.
+</ParamField>
+
+<ParamField body="flexibility" type="string" default="fixed">
+  `fixed` occupies a specific slot and can clash. `flexible` only wants a preferred window and never blocks time.
+</ParamField>
+
+<ParamField body="preferredWindow" type="string">
+  When `flexibility` is `flexible` — one of `morning`, `afternoon`, `evening`, `night`.
+</ParamField>
+
+<ParamField body="priority" type="string" default="normal">
+  One of `critical`, `high`, `normal`, `low`, `nice_to_have`.
+</ParamField>
+
+<ParamField body="placeId" type="string">
+  UUID of a saved place to link this commitment to.
+</ParamField>
+
+<ParamField body="placeLabel" type="string">
+  Free-text location label (e.g. `"BKC, Mumbai"`) when no saved place is available.
+</ParamField>
+
+<ParamField body="contactId" type="string">
+  UUID of the contact this commitment is with.
+</ParamField>
+
+<ParamField body="notes" type="string">
+  Up to 4000 characters of free-text notes.
+</ParamField>
+
+<ParamField body="allDay" type="boolean" default="false">
+  When `true`, time of day is meaningless — renders as a span, not a slot.
+</ParamField>
+
+<ParamField body="endsAt" type="string">
+  ISO 8601 datetime — required for multi-day items. Must be after `dueAt`.
+</ParamField>
+
+<ParamField body="deadline" type="string">
+  ISO 8601 datetime — must be done by then, even when the exact time is undecided.
+</ParamField>
+
+<ParamField body="waitingOn" type="string">
+  Free text — marks this as someone else's to-do (a check-in date). Waiting-on items claim no slot and are never overdue.
+</ParamField>
+
+<ParamField body="allowConflict" type="boolean">
+  Set `true` to bypass clash detection after the user has been shown the clash and chosen to double-book.
+</ParamField>
+
+**Responses**
+
+`201` — the created `CommitmentDTO`.
+
+`400 ends_before_it_starts` — `endsAt` is not after `dueAt`.
+
+`409 time_conflict` — the slot is already taken.
+
+```json 409-response
+{
+  "error": "time_conflict",
+  "conflicts": [
+    {
+      "id": "abc123",
+      "title": "Team standup",
+      "dueAt": "2026-10-15T10:00:00+05:30",
+      "durationMinutes": 30,
+      "status": "pending"
+    }
+  ],
+  "suggestions": ["2026-10-15T10:30:00+05:30", "2026-10-15T14:00:00+05:30"],
+  "locationConflicts": []
+}
+```
+
+<CodeGroup>
+```bash create-commitment
+curl -X POST http://localhost:3002/api/commitments \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Call dentist", "dueAt": "2026-10-15T10:00:00+05:30", "durationMinutes": 30}'
+```
+</CodeGroup>
+
+---
+
+### `GET /api/commitments/:id`
+
+Returns a single commitment by ID, for populating an edit form.
+
+**Response** — a `CommitmentDTO`.
+
+---
+
+### `PATCH /api/commitments/:id`
+
+Partial update. Only the fields present in the body change; omitted fields are left as they are.
+
+<Note>
+  If `dueAt` or `durationMinutes` changes and the item is still `pending`, clash detection runs again. Moving a commitment resets its `escalationCount` to zero — you are not "3 hours late" for a time you just changed.
+</Note>
+
+**Request body** — same optional fields as `POST /api/commitments`, plus:
+
+<ParamField body="status" type="string">
+  One of `pending`, `done`, `cancelled`. Setting `done` stamps `completedAt`; setting `cancelled` stamps `cancelledAt`. Both are cleared if the item is reopened.
+</ParamField>
+
+**Response** — the updated `CommitmentDTO`.
+
+**Error codes:** `404 not_found`, `409 time_conflict` (same shape as create).
+
+---
+
+### `DELETE /api/commitments/:id`
+
+Soft-deletes the commitment: sets `status → deleted` and stamps `deletedAt`. The row survives and appears in history as "let go". Cancels all pending reminders.
+
+<Tip>
+  **Cancelled vs deleted.** Cancelled means the thing still exists and sits on the calendar struck through. Deleted means take it off all lists. Both are remembered, under different words.
+</Tip>
+
+**Response**
+
+```json
+{ "ok": true }
+```
+
+---
+
+### `POST /api/commitments/:id/reschedule`
+
+Moves an existing commitment to an absolute new time. This is the "shift the other one" action when resolving a clash — `snooze` only pushes forward from now, which is the wrong tool when rearranging a day.
+
+**Request body**
+
+<ParamField body="dueAt" type="string" required>
+  ISO 8601 datetime — the new time.
+</ParamField>
+
+<ParamField body="durationMinutes" type="number">
+  If omitted, the existing duration is kept.
+</ParamField>
+
+<ParamField body="allowConflict" type="boolean">
+  Set `true` to override clash detection after user confirms.
+</ParamField>
+
+**Response**
+
+```json
+{ "ok": true, "dueAt": "2026-10-15T11:00:00.000Z" }
+```
+
+**Error codes:** `404 not_found`, `409 time_conflict`.
+
+---
+
+### `POST /api/commitments/:id/done`
+
+Marks a commitment done. Idempotent — if it is already done, returns `{ ok: true, already: true }` and preserves the original `completedAt`.
+
+---
+
+### `POST /api/commitments/:id/cancel`
+
+Marks a commitment cancelled and stamps `cancelledAt`. The item remains visible on the calendar (struck through) so the freed slot is explained.
+
+---
+
+### `POST /api/commitments/:id/snooze`
+
+Pushes the commitment forward from now. Resets `escalationCount` to zero — the item starts chasing again from attempt zero at the new time.
+
+**Request body**
+
+<ParamField body="minutes" type="number" required>
+  How many minutes from now. 1–43200 (30 days).
+</ParamField>
+
+---
+
+### `POST /api/commitments/check-conflicts`
+
+Pre-flight clash check, called as soon as a time is picked so a clash is shown before the user hits save.
+
+**Request body**
+
+<ParamField body="dueAt" type="string" required>ISO 8601 datetime.</ParamField>
+<ParamField body="durationMinutes" type="number" required>Duration in minutes.</ParamField>
+<ParamField body="placeLabel" type="string">Location label, for travel-time checks.</ParamField>
+<ParamField body="lat" type="number">Latitude for location conflict detection.</ParamField>
+<ParamField body="lng" type="number">Longitude for location conflict detection.</ParamField>
+<ParamField body="allDay" type="boolean">If `true`, skips time-based clash detection (location checks still run).</ParamField>
+<ParamField body="excludeId" type="string">UUID of the commitment being rescheduled — excludes it from the check.</ParamField>
+
+**Response** — a `ConflictReport`:
+
+<ResponseField name="conflicts" type="CommitmentDTO[]">
+  Pending fixed commitments whose slot overlaps the proposed one.
+</ResponseField>
+
+<ResponseField name="suggestions" type="string[]">
+  The earliest free ISO 8601 times, so the UI can offer "shift it to 4:30" instead of making the user hunt.
+</ResponseField>
+
+<ResponseField name="locationConflicts" type="LocationConflictDTO[]">
+  Where-based problems: a trip to another city, or not enough travel time between two places.
+</ResponseField>
+
+---
+
+## Status values
+
+| Status | Meaning |
+|---|---|
+| `pending` | Not yet done. Reminder chain is active. |
+| `done` | Completed. `completedAt` is set. |
+| `cancelled` | Not happening. Stays on the calendar struck through. `cancelledAt` is set. |
+| `deleted` | Soft-deleted. Off all lists; row survives in history. |
+
+## Flexibility
+
+| Value | Behaviour |
+|---|---|
+| `fixed` | Occupies a specific time slot. Clashes with other fixed items. |
+| `flexible` | Wants a `preferredWindow` but makes no claim on the clock. Never blocks a slot, never causes a 409. |

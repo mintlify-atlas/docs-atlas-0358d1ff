@@ -1,0 +1,356 @@
+---
+title: "Environment Variables Reference for Cue"
+sidebarTitle: "Environment"
+description: "Complete reference for all Cue environment variables — required, optional, and auto-derived — read from a single .env file at the repo root."
+---
+
+Cue reads all configuration from a single `.env` file at the repository root. Both the API server (`apps/api`) and the Vite dev server (`apps/web`) load from this same file — `apps/web/vite.config.ts` sets `envDir` to the repo root for exactly that reason. Copy `.env.example` to `.env` and fill in the values relevant to your deployment before starting.
+
+## Complete `.env.example`
+
+```dotenv
+# Copy to .env at the repo root. Both the API and the web app read this one
+# file — apps/web/vite.config.ts sets envDir to the root for exactly that.
+
+# ---------------------------------------------------------------- database
+# Any PostgreSQL 14+ instance. Local install, no Docker needed.
+DATABASE_URL=postgres://cue:cue@localhost:5432/cue
+
+# --------------------------------------------------------------------- api
+PORT=3002
+# Which interfaces the server listens on. Behind a reverse proxy on the same
+# machine set this to 127.0.0.1: the process then cannot be reached from the
+# internet at all, whatever the firewall says. Leave blank for a laptop.
+HOST=
+# Origin the browser loads the web app from. Used for the CORS allow-list, so
+# it must match exactly (scheme, host and port).
+WEB_ORIGIN=http://localhost:5173
+# Any long random string. Changing it signs everyone out.
+JWT_SECRET=dev-secret-change-me
+
+# ---------------------------------------------------------------- web push
+# Generate a pair with:  npm run vapid
+# The public key is not a secret — the browser needs it to subscribe.
+# Changing either key invalidates every existing subscription, so generate once
+# and keep the same pair across local and production.
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+# Must be a mailto: or https: URL. Push services use it to contact you if your
+# server starts misbehaving.
+VAPID_SUBJECT=mailto:you@example.com
+
+# ------------------------------------------------------- reminder engine
+# How often the worker looks for due reminders.
+REMINDER_POLL_MS=20000
+# Gap between escalations once a reminder has fired and nothing was done.
+ESCALATION_MINUTES=15
+# How many times to chase before it stops buzzing. The commitment still stays
+# in the "You dropped these" list forever — this only caps the notifications.
+MAX_ESCALATIONS=4
+
+# --------------------------------------------------------------------- web
+# Port the Vite dev server binds to. Keep WEB_ORIGIN in sync with it.
+WEB_PORT=5173
+
+# Where the browser should call the API.
+#   Development : http://localhost:3002  (Vite serves the app on another port)
+#   Production  : leave BLANK — the API serves the built app from the same
+#                 origin, so the browser just calls /api with no host at all.
+# IN PRODUCTION THIS MUST BE BLANK.
+# VITE_API_URL=http://localhost:3002
+VITE_API_URL=
+
+# ------------------------------------------------- business lookup by location
+# auto  = use Google when a key is set below, otherwise OpenStreetMap
+# osm   = always OpenStreetMap (free, no key, patchy for small Indian clinics)
+# google= always Google Places (much better coverage, needs billing enabled)
+# none  = disable the "nearby businesses" suggestions entirely
+PLACE_LOOKUP_PROVIDER=auto
+# Leave blank to use the free OpenStreetMap provider.
+GOOGLE_PLACES_API_KEY=
+
+# ----------------------------------------------------------- outgoing mail
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM=Cue <no-reply@your-domain>
+
+# ------------------------------------------------------- Google Calendar
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Only if the derived one is wrong for your setup.
+GOOGLE_REDIRECT_URI=
+
+# ------------------------------------------------ Microsoft / Outlook calendar
+MICROSOFT_CLIENT_ID=
+MICROSOFT_CLIENT_SECRET=
+MICROSOFT_TENANT=common
+# Only if the derived one is wrong for your setup.
+MICROSOFT_REDIRECT_URI=
+
+# ------------------------------------------- understanding dictated sentences
+ENCRYPTION_KEY=
+AI_DEFAULT_MODEL=claude-haiku-5-5
+
+# ------------------------------------------- reading lines the rules cannot
+ANTHROPIC_API_KEY=
+CAPTURE_AI_MODEL=claude-haiku-5-5
+CAPTURE_AI_DAILY_LIMIT=40
+
+# ------------------------------------------------------- the Android app
+ANDROID_PACKAGE=in.vitelio.cue
+ANDROID_CERT_SHA256=
+
+# ------------------------------------------------------------------- travel
+TRAVEL_SPEED_KMH=45
+```
+
+---
+
+## Required
+
+These two variables must be set or the server will refuse to start.
+
+<ParamField path="DATABASE_URL" type="string" required>
+  PostgreSQL connection URL for any PostgreSQL 14+ instance. Local installs work fine — no Docker required. For managed hosts (RDS, Neon, Supabase) append `?sslmode=require` or the driver connects in the clear and the host refuses.
+
+  **Example:** `postgres://cue:password@localhost:5432/cue`
+</ParamField>
+
+<ParamField path="JWT_SECRET" type="string" required>
+  Any long random string used to sign session tokens. Changing it invalidates every active session, signing everyone out. Generate with:
+
+  ```bash
+  openssl rand -hex 32
+  ```
+</ParamField>
+
+---
+
+## Server
+
+<ParamField path="PORT" type="number" default="3002">
+  The port the API server listens on. Also the port the built web app is served from in production (one process, one port).
+</ParamField>
+
+<ParamField path="HOST" type="string" default="0.0.0.0">
+  The network interface to bind to. Behind a reverse proxy on the same machine, set this to `127.0.0.1` — the process then cannot be reached from outside at all, not through a mistakenly opened firewall port and not by anything other than the proxy in front of it. Leave blank for a laptop where you want to reach the API from other devices on the same network.
+</ParamField>
+
+<ParamField path="WEB_ORIGIN" type="string" default="http://localhost:5173">
+  The exact origin the browser loads the web app from (scheme, host, and port). Used for the CORS allow-list. Must match exactly — a missing port or wrong scheme will block API calls in the browser.
+
+  In production, set this to your real domain: `https://cue.example.com`.
+</ParamField>
+
+<Note>
+  `APP_TIMEZONE` (default `Asia/Kolkata`) sets `process.TZ` for the whole server and controls day boundaries. It is set by `apps/api/src/timezone.ts` before any dates are constructed and is not listed in `.env.example` because most deployments do not need to change it.
+</Note>
+
+---
+
+## Web Push / VAPID
+
+<ParamField path="VAPID_PUBLIC_KEY" type="string">
+  The public half of the VAPID key pair. Not a secret — the browser needs it to subscribe. Generate with `npm run vapid`. See the [Push Notifications](/configuration/push-notifications) guide for full setup instructions.
+</ParamField>
+
+<ParamField path="VAPID_PRIVATE_KEY" type="string">
+  The private half of the VAPID key pair. Keep this secret. Must be generated alongside `VAPID_PUBLIC_KEY` — the two keys are a matched pair.
+</ParamField>
+
+<ParamField path="VAPID_SUBJECT" type="string" default="mailto:dev@example.com">
+  A `mailto:` or `https:` URL that push services can use to contact you if your server misbehaves. Set to your real email address in production: `mailto:you@your-domain.com`.
+</ParamField>
+
+<ParamField path="REMINDER_POLL_MS" type="number" default="20000">
+  How often (in milliseconds) the reminder worker checks for due reminders. The default is 20 seconds. Lowering this makes reminders fire more promptly; raising it reduces database load on heavily shared instances.
+</ParamField>
+
+<ParamField path="ESCALATION_MINUTES" type="number" default="15">
+  The gap in minutes between escalation notifications once a reminder has fired and no action has been taken. After the initial notification, the next buzz arrives this many minutes later.
+</ParamField>
+
+<ParamField path="MAX_ESCALATIONS" type="number" default="4">
+  How many times the worker re-notifies before giving up. After this many attempts the buzzing stops, but the commitment stays in the **You dropped these** list permanently — it is never silently forgotten.
+</ParamField>
+
+---
+
+## Frontend
+
+<ParamField path="WEB_PORT" type="number" default="5173">
+  The port the Vite dev server binds to. Keep `WEB_ORIGIN` in sync with this value.
+</ParamField>
+
+<ParamField path="VITE_API_URL" type="string" default="">
+  Where the browser should call the API.
+
+  - **Development:** `http://localhost:3002` (Vite serves the app on a different port, so the browser needs an explicit host)
+  - **Production:** leave **blank** — the API serves the built app from the same origin, so the browser calls a relative `/api` with no host at all
+
+  <Warning>
+    **`VITE_API_URL` must be blank in production.** The OAuth redirect URIs sent to Google and Microsoft are derived from this variable. Leaving the development value (`http://localhost:3002`) in production means every consent screen redirects back to `localhost`, regardless of what redirect URIs you have registered with the provider.
+  </Warning>
+</ParamField>
+
+---
+
+## Place Lookup
+
+<ParamField path="PLACE_LOOKUP_PROVIDER" type="string" default="auto">
+  Controls which provider is used to look up nearby businesses when logging a visit.
+
+  | Value | Behaviour |
+  |---|---|
+  | `auto` | Uses Google Places when `GOOGLE_PLACES_API_KEY` is set; falls back to OpenStreetMap |
+  | `osm` | Always uses OpenStreetMap (free, no key required; coverage is patchy for small Indian clinics) |
+  | `google` | Always uses Google Places (requires `GOOGLE_PLACES_API_KEY` and billing enabled) |
+  | `none` | Disables the nearby business suggestions entirely |
+</ParamField>
+
+<ParamField path="GOOGLE_PLACES_API_KEY" type="string">
+  A Google Places API key with billing enabled. Leave blank to use the free OpenStreetMap provider instead. Google Places has significantly better coverage, especially for small practices in India.
+</ParamField>
+
+---
+
+## SMTP
+
+SMTP is used for exactly one thing: sending password reset links. Without `SMTP_HOST` and `SMTP_FROM`, the forgot-password route refuses outright rather than claiming to have sent a message it could not send.
+
+<ParamField path="SMTP_HOST" type="string">
+  The hostname of your SMTP server. Any provider works — SES, Mailgun, Postmark, a Gmail app password. Leave blank to disable password reset emails.
+</ParamField>
+
+<ParamField path="SMTP_PORT" type="number" default="587">
+  The SMTP port. Port `465` uses implicit TLS; `587` and `25` use STARTTLS.
+</ParamField>
+
+<ParamField path="SMTP_USER" type="string">
+  SMTP authentication username. Leave blank for a relay that needs no authentication.
+</ParamField>
+
+<ParamField path="SMTP_PASSWORD" type="string">
+  SMTP authentication password.
+
+  <Note>
+    On AWS SES, the SMTP credentials are found under **SMTP settings** — they are **not** your AWS access keys. New SES accounts are sandboxed and can only send to verified addresses until you request production access.
+  </Note>
+</ParamField>
+
+<ParamField path="SMTP_FROM" type="string" default='Cue <no-reply@your-domain>'>
+  The From address for outgoing mail. Must be an address the SMTP provider lets you send as.
+</ParamField>
+
+---
+
+## Google Calendar OAuth
+
+These variables enable the **Connect your Google account** flow in calendar settings. They are not billed API keys — they only identify the app on Google's consent screen.
+
+<ParamField path="GOOGLE_CLIENT_ID" type="string">
+  The client ID from a Web application OAuth client in the Google Cloud Console. See [Calendar Integrations](/configuration/calendar-integrations) for setup instructions.
+</ParamField>
+
+<ParamField path="GOOGLE_CLIENT_SECRET" type="string">
+  The client secret matching `GOOGLE_CLIENT_ID`.
+</ParamField>
+
+<ParamField path="GOOGLE_REDIRECT_URI" type="string">
+  The OAuth redirect URI to send back to after consent. Normally leave this blank — Cue derives it automatically from `VITE_API_URL` (in development) or `WEB_ORIGIN` (in production), producing `http://localhost:3002/api/oauth/google/callback` locally and your domain's equivalent in production.
+
+  Only set this if the derived URI does not match what you have registered in the Google Cloud Console.
+
+  <Warning>
+    `ENCRYPTION_KEY` is also required when Google OAuth is configured. The OAuth tokens are stored encrypted at rest with AES-256-GCM and the server refuses to store them without an encryption key.
+  </Warning>
+</ParamField>
+
+---
+
+## Microsoft / Outlook OAuth
+
+These variables enable the **Connect a Microsoft account** flow. Also not billed — registration is free in the Azure portal.
+
+<ParamField path="MICROSOFT_CLIENT_ID" type="string">
+  The Application (client) ID from an App registration in Microsoft Entra ID.
+</ParamField>
+
+<ParamField path="MICROSOFT_CLIENT_SECRET" type="string">
+  A client secret created under **Certificates & secrets** for the App registration.
+</ParamField>
+
+<ParamField path="MICROSOFT_TENANT" type="string" default="common">
+  Controls which account types may sign in.
+
+  | Value | Who can connect |
+  |---|---|
+  | `common` | Work/school accounts **and** personal Microsoft accounts (default) |
+  | `organizations` | Work/school accounts only |
+  | `<tenant id>` | A single specific organisation only |
+
+  The default is the permissive setting — a planner is a personal thing even when the calendar is not.
+</ParamField>
+
+<ParamField path="MICROSOFT_REDIRECT_URI" type="string">
+  Like `GOOGLE_REDIRECT_URI`, leave blank and Cue derives it. The derived value is `http://localhost:3002/api/oauth/microsoft/callback` in development and your production domain's equivalent otherwise.
+</ParamField>
+
+---
+
+## Encryption & AI
+
+<ParamField path="ENCRYPTION_KEY" type="string">
+  A 32-byte hex string used to encrypt sensitive data at rest with AES-256-GCM: OAuth tokens, ICS calendar URLs, and per-org AI provider keys. Without it, Google Calendar OAuth, Microsoft OAuth, and the BYOK (bring-your-own-key) AI feature are all unavailable.
+
+  Generate with:
+  ```bash
+  node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  ```
+
+  <Warning>
+    Changing `ENCRYPTION_KEY` makes every stored credential unreadable. Users will need to re-enter their API keys and reconnect Google/Microsoft calendars.
+  </Warning>
+</ParamField>
+
+<ParamField path="AI_DEFAULT_MODEL" type="string" default="claude-haiku-5-5">
+  The Anthropic model used when an org configures the `anthropic` provider and supplies its own API key for multi-event paragraph extraction. See [AI Settings](/configuration/ai-settings).
+</ParamField>
+
+<ParamField path="ANTHROPIC_API_KEY" type="string">
+  Cue's own Anthropic key for the real-time capture assistant — the feature that reads a short ambiguous line (e.g. `doctor`, `mom ko sham ko call karna hai`) while the user is still typing and turns it from a guess into a question. Only that line and today's date are sent. Leave blank to disable this feature; the deterministic parsers continue to work without it.
+</ParamField>
+
+<ParamField path="CAPTURE_AI_MODEL" type="string" default="claude-haiku-5-5">
+  The model used for the real-time capture assistant (`ANTHROPIC_API_KEY`).
+</ParamField>
+
+<ParamField path="CAPTURE_AI_DAILY_LIMIT" type="number" default="40">
+  The maximum number of AI readings per person per day for the capture assistant. Acts as a per-account cost ceiling.
+</ParamField>
+
+---
+
+## Android
+
+<ParamField path="ANDROID_PACKAGE" type="string" default="in.vitelio.cue">
+  The Android package name for the Trusted Web Activity. Published at `/.well-known/assetlinks.json` so Android allows the app to open the site full-screen. Only relevant if you are publishing an Android app.
+</ParamField>
+
+<ParamField path="ANDROID_CERT_SHA256" type="string">
+  SHA-256 certificate fingerprints for the Android app, comma-separated. Include both the Play Store app-signing key fingerprint and your upload key fingerprint. Leave blank to disable the Digital Asset Links file entirely — a wrong statement is worse than none.
+
+  **Format:** `AB:CD:EF:...:12` (colon-separated hex pairs, uppercase)
+</ParamField>
+
+---
+
+## Travel
+
+<ParamField path="TRAVEL_SPEED_KMH" type="number" default="45">
+  The average door-to-door speed (in km/h) used for travel-time estimates between locations. The default of 45 km/h reflects Indian road conditions rather than motorways. Raise this if your journeys are mostly highway.
+
+  Travel estimates use straight-line distance × 1.35 (for winding roads), divided by this speed, plus 30 minutes of overhead. The UI labels these as estimates, not routed journeys.
+</ParamField>

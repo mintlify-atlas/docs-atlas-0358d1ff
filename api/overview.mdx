@@ -1,0 +1,165 @@
+---
+title: "Cue REST API — Endpoints, Auth, and Error Codes"
+sidebarTitle: "Overview"
+description: "The Cue API is a Fastify 5 REST API at /api — all routes require JWT bearer auth, responses are JSON, and errors follow a consistent shape with string codes."
+---
+
+The Cue API is a [Fastify 5](https://fastify.dev) REST API that powers every feature of the Cue personal planner. All request and response bodies are JSON. Every route is scoped to the authenticated caller's organisation — the org ID is derived from the JWT and never trusted from the request body, so a caller cannot read or write across tenant boundaries.
+
+## Base URL
+
+<Note>
+  In **development**, the API runs on its own port separate from the Vite dev server. In **production**, the API serves the built web app from the same origin, so there is no CORS and the browser calls a relative `/api`.
+</Note>
+
+| Environment | Base URL |
+|---|---|
+| Development | `http://localhost:3002/api` |
+| Production | Same origin as the web app — relative `/api` |
+
+## Authentication
+
+All routes require an `Authorization: Bearer <jwt>` header **except**:
+
+- `GET /health` — server health check
+- `POST /api/auth/register` — create an account
+- `POST /api/auth/login` — obtain a JWT
+- `POST /api/auth/forgot` — request a password-reset link
+- `POST /api/auth/reset` — spend a password-reset token
+- `GET /api/oauth/:provider/start` — begin an OAuth flow
+- `GET /api/oauth/:provider/callback` — OAuth redirect target
+
+Obtain a token with `POST /api/auth/login`, then pass it in the `Authorization` header on every subsequent request. Tokens are signed with `JWT_SECRET` and expire after **30 days**. The user's role is read from the database on every request — not from the JWT — so removing access takes effect immediately rather than at token expiry.
+
+## Error Response Shape
+
+Every error from the API follows a consistent JSON envelope with a stable string `error` code that is safe to branch on in client code.
+
+```json
+{ "error": "<string_code>", "message": "<human readable>" }
+```
+
+### Common Error Codes
+
+| HTTP Status | `error` code | Meaning |
+|---|---|---|
+| `400` | `invalid_input` | Request body failed schema validation (Zod error or bad UUID in URL) |
+| `401` | `unauthorized` | Missing or invalid JWT |
+| `403` | `forbidden` | Valid JWT but insufficient permissions (e.g. member-only action requires owner role) |
+| `403` | `wrong_password` | Delete-account or change-password request supplied the wrong current password |
+| `404` | `not_found` | Resource does not exist or belongs to a different org |
+| `409` | `email_taken` | Registration attempted with an address already in use |
+| `409` | `time_conflict` | Commitment clashes with an existing slot |
+| `415` | `unsupported_image_type` | Avatar upload sent an unsupported MIME type |
+| `429` | `too_many_demos` | Demo account rate limit exceeded for this IP |
+| `500` | `internal_error` | Unexpected server error — details are in the server log, not the response |
+
+<Warning>
+  A `500 internal_error` response intentionally omits database details. The full error is written to the server log. Surfacing raw Postgres messages to callers would expose the schema and aid attackers.
+</Warning>
+
+### Time Conflict Response
+
+When saving or rescheduling a commitment produces a `409`, the response includes the clashing items so the caller can surface them to the user:
+
+```json
+{
+  "error": "time_conflict",
+  "clashes": [
+    {
+      "id": "uuid",
+      "title": "Team standup",
+      "dueAt": "2025-10-14T09:00:00.000Z",
+      "durationMinutes": 30
+    }
+  ]
+}
+```
+
+## Health Endpoint
+
+The health endpoint is intentionally outside the `/api` prefix and requires no authentication so load balancers and uptime monitors can reach it without a token.
+
+```http
+GET /health
+```
+
+```json
+{ "ok": true, "push": true }
+```
+
+`push: true` means VAPID keys are configured and push notifications will be delivered. `push: false` means reminders will fire but no push will reach the device.
+
+## Multi-Tenancy and Org Scoping
+
+Every authenticated handler calls `scope(req)` from `src/auth.ts` to obtain the caller's `{ sub, orgId, email }` from the verified JWT. **Every database query filters on that `orgId`.** IDs supplied in the request body or URL are never used to determine which org's data is accessed — guessing a UUID cannot reach across tenant boundaries.
+
+```ts
+// Every handler looks like this — the orgId comes from the token, never the body.
+const { sub, orgId } = scope(req)
+const rows = await db.select().from(schema.commitments)
+  .where(and(eq(schema.commitments.orgId, orgId), eq(schema.commitments.id, params.id)))
+```
+
+## Role-Based Access
+
+Cue has two roles, set at the org level:
+
+| Role | Who | What they can do |
+|---|---|---|
+| `owner` | The user who registered (created the org) | Everything, plus: change AI provider, store AI API key, manage billing |
+| `member` | Invited teammates | All personal features; cannot touch org-level settings |
+
+The role is read from the `users` row on every request. A role change takes effect on the very next API call — it is never cached in the token.
+
+## Pagination
+
+The API does not implement cursor or page-based pagination. Each list endpoint returns up to its configured internal limit. This is sufficient for a single-user or small-team planner; if you are building a heavily automated integration that needs to page through large datasets, consider querying the database directly.
+
+## Endpoint Reference
+
+A full inventory of every route exposed by the API:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Server health and push-notification status |
+| `POST` | `/api/auth/register` | Create an account and org; caller becomes the org owner |
+| `POST` | `/api/auth/login` | Authenticate and receive a JWT |
+| `POST` | `/api/auth/logout` | Invalidate the current session |
+| `POST` | `/api/auth/forgot` | Request a password-reset email (requires SMTP) |
+| `POST` | `/api/auth/reset` | Spend a password-reset token to set a new password |
+| `POST` | `/api/auth/change-password` | Change password while signed in (requires current password) |
+| `POST` | `/api/auth/avatar` | Upload a profile avatar (PNG, JPEG, or WebP; max 512 KB) |
+| `DELETE` | `/api/auth/avatar` | Remove the current avatar |
+| `GET` | `/api/auth/avatar/:id` | Serve the avatar image for a user in the same org |
+| `PATCH` | `/api/auth/profile` | Update display name and timezone |
+| `DELETE` | `/api/auth/me` | Delete your account and all data (password confirmation required) |
+| `GET` | `/api/me/preferences` | Retrieve all notification and scheduling preferences |
+| `PATCH` | `/api/me/preferences` | Update notification prefs, work hours, language, exam settings, and more |
+| `GET` | `/api/me/filled` | Which sections have data (drives tab visibility) |
+| `GET` | `/api/commitments` | List upcoming commitments |
+| `POST` | `/api/commitments` | Create a commitment (clash-checked) |
+| `PATCH` | `/api/commitments/:id` | Update a commitment; editing the time re-runs the clash check |
+| `DELETE` | `/api/commitments/:id` | Soft-delete a commitment |
+| `POST` | `/api/commitments/:id/reschedule` | Move to a new time (clash-checked, resets reminder chain) |
+| `GET` | `/api/commitments/range` | All commitments within a date range (used by the calendar grid) |
+| `GET` | `/api/visits` | List visits (logged interactions) |
+| `POST` | `/api/visits` | Log a visit; `clientId` makes offline retries idempotent |
+| `GET` | `/api/contacts` | List contacts |
+| `POST` | `/api/contacts` | Create a contact |
+| `GET` | `/api/trips` | List trips |
+| `POST` | `/api/trips` | Create a trip |
+| `POST` | `/api/quick` | Natural-language one-line capture (`POST /api/quick`) |
+| `POST` | `/api/ai/extract` | AI multi-event extraction from a paragraph — returns proposals |
+| `GET` | `/api/insights` | Day brief and behavioural insights |
+| `GET` | `/api/triage` | Stuck/overdue commitments with diagnosis and suggested actions |
+| `GET` | `/api/recurrences` | List recurring rules |
+| `POST` | `/api/recurrences` | Create a recurring rule |
+| `GET` | `/api/calendar-feeds` | List connected calendar feeds |
+| `POST` | `/api/calendar-feeds` | Add a calendar feed (URL or file) |
+| `GET` | `/api/places/:id/suggestion` | Suggest a follow-up for a known place based on visit history |
+| `POST` | `/api/places/lookup` | Look up businesses at given coordinates |
+| `GET` | `/api/search` | Full-text search across commitments, contacts, trips, intentions, and more |
+| `GET` | `/api/intentions/nearby` | Intentions for places within 40 km of supplied coordinates |
+| `GET` | `/api/oauth/:provider/start` | Begin an OAuth flow (Google or Microsoft) |
+| `GET` | `/api/oauth/:provider/callback` | OAuth redirect target — issues a token and redirects |

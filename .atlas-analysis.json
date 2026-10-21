@@ -1,0 +1,132 @@
+{
+  "projectType": "saas",
+  "projectName": "Cue",
+  "projectDescription": "A personal assistant and planner that turns plain-English sentences into tracked plans with escalating reminders, conflict detection, and intelligent daily scheduling.",
+  "theme": "luma",
+  "primaryColor": "#119eff",
+  "lightColor": "#ffffff",
+  "darkColor": "#040404",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment",
+              "configuration/push-notifications",
+              "configuration/calendar-integrations",
+              "configuration/ai-settings"
+            ]
+          },
+          {
+            "group": "Core Features",
+            "pages": [
+              "features/capture",
+              "features/plans-and-reminders",
+              "features/scheduling",
+              "features/trips-and-intentions",
+              "features/people-and-contacts",
+              "features/recurring-plans",
+              "features/calendar-feeds",
+              "features/mail-reading",
+              "features/search"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/managed-platform",
+              "deployment/self-hosted",
+              "deployment/github-actions"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/local-setup",
+              "development/testing",
+              "development/database-migrations",
+              "development/android"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api/overview",
+              "api/authentication"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/commitments",
+              "api/visits",
+              "api/contacts",
+              "api/trips",
+              "api/calendar-feeds",
+              "api/quick-add",
+              "api/insights",
+              "api/recurrences"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Natural-language capture of plans, trips, expenses, bills, and contacts in English, Hinglish, and Hindi",
+    "Escalating reminder engine with per-user notification chains via Web Push",
+    "Deterministic date/recurrence parsers — no LLM required for most inputs",
+    "Conflict detection: time-slot clashes and travel-distance warnings between plans",
+    "Google and Microsoft calendar/mail OAuth integration (read-only mirroring)",
+    "AI-assisted capture (Anthropic/Ollama, bring-your-own-key, opt-in only)",
+    "Offline-capable PWA with IndexedDB outbox and idempotent sync",
+    "Android TWA (Trusted Web Activity) via Bubblewrap",
+    "Multi-tenant with org-scoped data and role-based access (owner / member)",
+    "Morning brief, daily nudge, meeting prep, weekly review, and focus-block workers"
+  ],
+  "publicApiSurface": [
+    "POST /api/auth/register",
+    "POST /api/auth/login",
+    "GET  /api/commitments",
+    "POST /api/commitments",
+    "POST /api/commitments/:id/reschedule",
+    "GET  /api/commitments/range",
+    "GET  /api/visits",
+    "POST /api/visits",
+    "GET  /api/contacts",
+    "POST /api/contacts",
+    "GET  /api/trips",
+    "POST /api/trips",
+    "POST /api/quick",
+    "POST /api/ai/extract",
+    "GET  /api/insights",
+    "GET  /api/triage",
+    "GET  /api/places/:id/suggestion",
+    "POST /api/places/lookup",
+    "GET  /api/recurrences",
+    "POST /api/recurrences",
+    "GET  /api/calendar-feeds",
+    "POST /api/calendar-feeds",
+    "POST /api/oauth/google/callback",
+    "POST /api/oauth/microsoft/callback",
+    "GET  /api/search",
+    "GET  /api/intentions/nearby",
+    "GET  /health"
+  ]
+}

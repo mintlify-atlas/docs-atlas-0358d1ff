@@ -1,0 +1,230 @@
+---
+title: "Mirror Google, Microsoft, and iCal Calendar Feeds"
+sidebarTitle: "Calendar Feeds"
+description: "Cue reads Google Calendar, Microsoft Outlook, iCal secret URLs, and uploaded .ics files read-only, syncing every 30 minutes and deduplicating by event UID."
+---
+
+Cue mirrors external calendars into your planner so the reminder engine, conflict detection, and Today view know about meetings you did not type in. Three import methods exist because the first option is not always available, and the second is sometimes hours behind.
+
+## Three ways to import a calendar
+
+<Tabs>
+  <Tab title="OAuth (Google / Microsoft)">
+    Connect your Google account or Microsoft account in **Settings → Calendars I read**. One button, the provider's own consent screen, then pick which calendars to mirror.
+
+    This is the route to use when it is available. The OAuth API answers immediately — a meeting booked ten minutes ago is already visible. Google's iCal feed, by contrast, can be hours behind.
+
+    **Setup required (self-hosted):**
+
+    For Google: enable the Calendar API at `console.cloud.google.com`, create an OAuth client ID, and add `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` to your `.env`. The redirect URI must match exactly:
+    ```
+    http://localhost:3002/api/oauth/google/callback
+    ```
+
+    For Microsoft: register an app at `portal.azure.com` → Microsoft Entra ID → App registrations. The only permission needed is the delegated Graph scope `Calendars.Read`. Redirect URI:
+    ```
+    http://localhost:3002/api/oauth/microsoft/callback
+    ```
+  </Tab>
+  <Tab title="Secret iCal URL">
+    Any calendar that publishes an iCal link works: Apple Calendar, Outlook, or Google's **Settings → Integrate calendar → Secret address in iCal format**.
+
+    Paste the URL in **Settings → Calendars I read → By secret address**. The address is encrypted at rest with `ENCRYPTION_KEY` — the UI shows only the host and a short fingerprint, never the full URL.
+
+    <Warning>
+      Google regenerates its iCal feed slowly — often hours behind, occasionally a day. Use the OAuth route for anything time-sensitive. The secret URL route is fine for checking your week; it is unreliable for something booked ten minutes ago.
+    </Warning>
+  </Tab>
+  <Tab title=".ics File Upload">
+    This always works. A Google Workspace administrator can disable external sharing (removing the secret iCal address entirely), and a calendar you do not own never had a secret URL — but anyone can export a file.
+
+    In Google Calendar: **Settings → Import & export → Export** gives a `.zip` with one `.ics` per calendar.
+
+    The trade-off: a file is a snapshot. It updates when you upload a newer export (**Replace file**), not on a timer. The scheduled sync sweep skips file-sourced feeds rather than failing on them every 30 minutes.
+  </Tab>
+</Tabs>
+
+## Sync schedule and on-demand reads
+
+Feeds are re-read every **30 minutes** automatically. You can trigger an immediate re-read with the **Read now** button next to any connected calendar — the `POST /api/calendar-feeds/:id/sync` endpoint runs the same reconciliation inline and reports back what changed.
+
+## Deduplication by event UID
+
+Every iCalendar event carries a stable UID. Cue keys on that UID, not on the delivery method. Re-reading the same feed updates events in place rather than creating duplicates. Re-uploading a newer `.ics` export for an existing feed replaces its events, because the UID is the same regardless of how the file arrived.
+
+## Read-only: Cue never writes back
+
+Cue mirrors feeds in one direction only. The worst a bad sync can do is show a stale meeting — it can never touch what your colleagues see. Scopes requested are `calendar.readonly` (Google) and `Calendars.Read` (Microsoft). A test in the codebase asserts the read-write scope is never requested.
+
+## Reminders per calendar
+
+Each connected calendar has a **Reminders on/off** toggle. Off means Cue shows the events and counts them toward clash detection, but does not buzz — the source calendar is already doing that. When you toggle reminders on a feed, the change applies retroactively to all the events it already brought in.
+
+## Mirrored all-day events
+
+All-day events from connected calendars — public holidays, out-of-office blocks — appear as **"From your calendar"** context rows. They have no Done button and no overdue state. They are why Thursday is a bad day to book something, not work you tick off.
+
+## Narrow deletion rules
+
+An event that vanishes from its feed is removed from Cue **only if** all of the following are true:
+
+- It is still in the future
+- It is still `pending` (not marked done or cancelled)
+- You have not edited it yourself
+
+Nothing you wrote is ever touched by a sync. Your own edits to a mirrored event survive re-reads.
+
+## Disconnecting
+
+Disconnecting a calendar removes every event it brought in and nothing else. Your own plans are untouched. Google Calendar is never modified at any point.
+
+---
+
+## Google-specific behaviour
+
+<Accordion title="Why the iCal feed lags and the OAuth API does not">
+  Google maintains its iCal feed asynchronously. Changes made in Google Calendar take an unpredictable amount of time to appear in the feed — sometimes minutes, sometimes hours. The Calendar API (used by the OAuth path) is the authoritative source and reflects changes immediately.
+</Accordion>
+
+<Accordion title="All-day event end dates are exclusive">
+  A one-day holiday on 2 October is written `DTSTART: 2 Oct / DTEND: 3 Oct` in Google's representation. Taken literally, every single-day event would span two days. Cue subtracts one day from all-day end timestamps to get the inclusive end date.
+
+  This is pinned by a test — both import paths (OAuth and `.ics`) apply the same normalisation so a holiday does not land on different days depending on how it was imported.
+</Accordion>
+
+<Accordion title="All-day dates have no timezone">
+  Google writes all-day dates as bare strings (`2026-10-02`) with no timezone. Using `new Date(string)` would parse them as UTC midnight and shift the day backwards for anyone west of Greenwich. Cue constructs a local date explicitly: `new Date(year, month - 1, day)`.
+</Accordion>
+
+<Accordion title="Cancelled weeks are exclusions, not separate events">
+  When one week of a recurring event is cancelled in Google, Google reports it as a separate record pointing back at the series. Cue folds these into the series' `exdates` exclusion list rather than importing them as standalone events. Re-syncing does not bring a cancelled week back.
+</Accordion>
+
+<Accordion title="No timeMin sent to the Google API">
+  `timeMin` is documented as a bound on an event's *end* time. The documentation does not clarify what this means for a series that started years ago and still runs weekly — it could quietly drop exactly the meetings most worth mirroring. Cue applies the history window after fetching, where anything outside it is counted and reported rather than silently lost.
+</Accordion>
+
+---
+
+## Microsoft-specific behaviour
+
+<Accordion title="Windows timezone names mapped to IANA zones">
+  Outlook stamps events with Windows timezone names like `India Standard Time` rather than IANA identifiers like `Asia/Kolkata`. `Intl` throws on Windows names. Before this was fixed, the parser fell back to the server's own timezone — so an 11:00 Pacific Teams meeting imported at 11:00 in India: **twelve and a half hours wrong, with no error anywhere**.
+
+  Windows timezone names are now mapped to IANA equivalents via `resolveZone`. Daylight saving is handled correctly: "Eastern Standard Time" in October is really EDT, and reading the name literally would be an hour off for half the year. A zone that still cannot be resolved causes the event to **skip with a reason naming the zone** — shown at the wrong time is not acceptable.
+</Accordion>
+
+<Accordion title="Timestamps have 7 fractional digits">
+  Graph sends timestamps like `2025-10-03T10:00:00.0000000`. The JavaScript `Date` constructor will not parse more than 3 fractional digits. Left unhandled, every single event from Microsoft would fail to import. Cue strips the extra digits before parsing.
+</Accordion>
+
+<Accordion title="relativeMonthly means nth weekday, not fortnightly">
+  `relativeMonthly` with `index: "second"` means "the second Tuesday of the month" — not "every two weeks". Read as an interval, the rule would drift off the real meeting date within two months. Cue maps this to a monthly rule with `setPos: 2`.
+
+  `relativeYearly` ("the first Monday of May every year") requires `setPos` on a yearly rule, which is not in Cue's model. It is **refused and reported** rather than imported as something that looks right once and is wrong on most dates.
+</Accordion>
+
+<Accordion title="No OAuth revocation endpoint">
+  Microsoft does not publish a token revocation endpoint. When you disconnect a Microsoft calendar, Cue deletes its stored tokens and tells you where to complete the revocation: the Microsoft account permissions page. Pretending the permission has been withdrawn when it has not would be misleading.
+</Accordion>
+
+<Accordion title="UTC preference header">
+  Cue sends `Prefer: outlook.timezone="UTC"` on every Graph request. This asks Microsoft to express all timestamps in UTC, eliminating most timezone conversion. The Windows timezone lookup is a fallback for servers that ignore the hint.
+</Accordion>
+
+<Accordion title="Teams join links in event notes">
+  Graph exposes the Teams join URL as a dedicated field on each event. Cue pulls it out and places it in the event notes as `Join: <url>`. It is tappable directly from the reminder notification — no digging through a calendar app needed.
+</Accordion>
+
+---
+
+## SSRF protection on iCal URLs
+
+The URL you paste is fetched from the server's own network position. Without protection, `http://169.254.169.254/...` (cloud metadata) or `http://localhost:5432` (your database) would be fetched and the response handed back.
+
+Cue enforces:
+
+- **`https://` required** — `webcal://` is translated; plain `http://` is rejected
+- **Redirects refused** — a redirect could hop to a private address after the initial check passed
+- **Private/loopback IPs rejected after DNS resolution** — a public hostname that resolves to `10.x.x.x`, `192.168.x.x`, `169.254.x.x`, or loopback is caught and refused
+
+IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`) are also checked so a private address cannot slip past by being written in a different notation.
+
+---
+
+## API
+
+<CodeGroup>
+
+```bash List connected calendars
+GET /api/calendar-feeds
+Authorization: Bearer <token>
+```
+
+```bash Subscribe by URL
+POST /api/calendar-feeds
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "label": "Work calendar",
+  "url": "https://calendar.google.com/calendar/ical/example%40gmail.com/private-abc123/basic.ics",
+  "remind": true,
+  "historyDays": 365
+}
+```
+
+```bash Upload a .ics file
+POST /api/calendar-feeds/upload?label=My+Calendar&remind=true&historyDays=365
+Authorization: Bearer <token>
+Content-Type: text/calendar
+
+BEGIN:VCALENDAR
+...
+```
+
+```bash Trigger an immediate sync
+POST /api/calendar-feeds/:id/sync
+Authorization: Bearer <token>
+```
+
+```bash Update label or reminder settings
+PATCH /api/calendar-feeds/:id
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "remind": false
+}
+```
+
+```bash Disconnect (removes mirrored events)
+DELETE /api/calendar-feeds/:id
+Authorization: Bearer <token>
+```
+
+</CodeGroup>
+
+### Sync report
+
+Every sync — on subscribe, on upload, or on **Read now** — returns a report:
+
+```json
+{
+  "feed": { "id": "uuid", "label": "Work calendar", "lastSyncedAt": "...", ... },
+  "report": {
+    "calendarName": "Work",
+    "imported": 12,
+    "updated": 3,
+    "removed": 1,
+    "skipped": 2,
+    "repeating": 4,
+    "outsideWindow": 47,
+    "oldest": "2022-03-01",
+    "newest": "2025-12-31",
+    "historyDays": 365
+  }
+}
+```
+
+`outsideWindow` tells you how many real events the file contained that fell outside the import window — so "12 events imported" from a calendar with three years of history does not look like a broken import. `skipped` counts events that could not be parsed (unreadable timezone, unsupported recurrence rule) and each carries a reason.

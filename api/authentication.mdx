@@ -1,0 +1,418 @@
+---
+title: "Authenticate with the Cue API Using JWT Bearer Tokens"
+sidebarTitle: "Authentication"
+description: "Cue uses JWT bearer tokens — register to create an org, login to get a token, then pass it in the Authorization header on every subsequent request."
+---
+
+The Cue API uses signed JWT bearer tokens for authentication. Registering creates both your user account and an organisation (tenant) in one step — the registering user automatically becomes the org `owner`. After registration or login, include the token in the `Authorization` header on every request to protected routes.
+
+<Note>
+  The user's **role is read from the database on every request**, not from the JWT payload. Changing a user's role or revoking access takes effect on their very next API call — there is no need to invalidate the token.
+</Note>
+
+---
+
+## Register
+
+`POST /api/auth/register` creates a new user and a new organisation in the same database transaction. The org is named after the registering user and can be renamed later.
+
+<CodeGroup>
+
+```bash register
+curl -X POST http://localhost:3002/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice", "email": "alice@example.com", "password": "secret123"}'
+```
+
+</CodeGroup>
+
+### Request Body
+
+<ParamField body="name" type="string" required>
+  The user's display name. Also used to name the org (`"Alice's account"`) until it is changed.
+</ParamField>
+
+<ParamField body="email" type="string" required>
+  Email address. Stored in lowercase. Must be unique across all accounts on this instance.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Plain-text password — hashed with bcrypt (cost 10) before storage. Never logged or returned.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="token" type="string">
+  Signed JWT. Valid for 30 days. Pass in `Authorization: Bearer <token>` on every subsequent request.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  <Expandable title="user fields">
+    <ResponseField name="id" type="string (uuid)">Unique user ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name as supplied.</ResponseField>
+    <ResponseField name="email" type="string">Normalised email address.</ResponseField>
+    <ResponseField name="role" type="string">`"owner"` — the first user of an org is always its owner.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="org" type="object">
+  <Expandable title="org fields">
+    <ResponseField name="id" type="string (uuid)">Org ID. Embedded in the JWT; never needs to be supplied again.</ResponseField>
+    <ResponseField name="name" type="string">Initial org name (`"Alice's account"`).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Error Responses
+
+| Status | `error` | Cause |
+|---|---|---|
+| `409` | `email_taken` | An account already exists for this email address |
+| `400` | `invalid_input` | Request body failed schema validation |
+
+---
+
+## Login
+
+`POST /api/auth/login` validates credentials and returns a fresh token.
+
+<CodeGroup>
+
+```bash login
+curl -X POST http://localhost:3002/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "alice@example.com", "password": "secret123"}'
+```
+
+</CodeGroup>
+
+### Request Body
+
+<ParamField body="email" type="string" required>
+  The account email address.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  Account password. Compared against the stored bcrypt hash.
+</ParamField>
+
+### Response `200 OK`
+
+<ResponseField name="token" type="string">
+  Signed JWT. Valid for 30 days.
+</ResponseField>
+
+<ResponseField name="user" type="object">
+  <Expandable title="user fields">
+    <ResponseField name="id" type="string (uuid)">User ID.</ResponseField>
+    <ResponseField name="name" type="string">Display name.</ResponseField>
+    <ResponseField name="email" type="string">Email address.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Error Responses
+
+| Status | `error` | Cause |
+|---|---|---|
+| `401` | `invalid_credentials` | Email not found or password did not match |
+
+<Warning>
+  The API deliberately returns the same `invalid_credentials` error whether the email is unknown or the password is wrong. Distinguishing them would let an attacker enumerate registered addresses.
+</Warning>
+
+---
+
+## Using the Token
+
+Pass the token as a `Bearer` credential in the `Authorization` header on every request to a protected route.
+
+<CodeGroup>
+
+```bash authenticated-request
+curl http://localhost:3002/api/commitments \
+  -H "Authorization: Bearer eyJhbGci..."
+```
+
+```typescript typescript-example
+const response = await fetch('/api/commitments', {
+  headers: {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  },
+})
+```
+
+</CodeGroup>
+
+If the header is missing or the token is expired, the API responds with:
+
+```json
+{ "error": "unauthorized" }
+```
+
+### Token Details
+
+| Property | Value |
+|---|---|
+| Algorithm | HS256 (HMAC-SHA256) |
+| Lifetime | 30 days from issuance |
+| Secret | `JWT_SECRET` environment variable |
+| Payload claims | `sub` (user ID), `orgId`, `email` |
+
+<Tip>
+  The JWT payload does **not** include the user's role. The role is fetched fresh from the database on every authenticated request, so demoting or removing a user takes effect immediately without requiring a token rotation.
+</Tip>
+
+---
+
+## Password Reset
+
+Password reset requires SMTP to be configured on the server. If no mail transport is available, the endpoint returns `503 mail_not_configured`.
+
+### Step 1 — Request a reset link
+
+```http
+POST /api/auth/forgot
+Content-Type: application/json
+
+{ "email": "alice@example.com" }
+```
+
+Always responds `{ "ok": true }` regardless of whether the email has an account — revealing "no such user" would turn this endpoint into an enumeration oracle. The reset link is valid for **60 minutes**.
+
+### Step 2 — Spend the link
+
+```http
+POST /api/auth/reset
+Content-Type: application/json
+
+{ "token": "<token from email>", "password": "new-password" }
+```
+
+| Status | `error` | Cause |
+|---|---|---|
+| `400` | `invalid_token` | Token not found (never existed or already expired and purged) |
+| `400` | `token_used` | Token was already spent |
+| `400` | `token_expired` | Token was valid but has expired |
+| `503` | `mail_not_configured` | SMTP is not set up on this instance |
+
+---
+
+## Change Password While Signed In
+
+Users who know their current password can change it without the reset flow:
+
+```http
+POST /api/auth/change-password
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "currentPassword": "old-password", "password": "new-password" }
+```
+
+Returns `{ "ok": true }` on success, or `403 wrong_password` if the current password is incorrect.
+
+---
+
+## OAuth Sign-In (Google / Microsoft)
+
+Cue supports sign-in via Google and Microsoft OAuth. Both providers follow the same flow:
+
+1. **Start** — Redirect the user to `GET /api/oauth/:provider/start`. This stores a short-lived state token and redirects the browser to the provider's consent screen.
+2. **Consent** — The user approves on the provider's own page.
+3. **Callback** — The provider redirects back to `GET /api/oauth/:provider/callback`. Cue exchanges the code, creates or updates the connected account, issues a JWT, and redirects to the web app with the token.
+
+<Note>
+  OAuth sign-in requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (for Google) or `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (for Microsoft) to be set in `.env`. These are free OAuth credentials — not billed API keys.
+</Note>
+
+The redirect URI registered in your provider's console must match exactly:
+
+```
+# Development
+http://localhost:3002/api/oauth/google/callback
+http://localhost:3002/api/oauth/microsoft/callback
+
+# Production (same origin as the web app)
+https://your-domain.com/api/oauth/google/callback
+https://your-domain.com/api/oauth/microsoft/callback
+```
+
+---
+
+## Current User Profile
+
+### Get profile
+
+`GET /api/me/preferences` returns the full preferences object for the authenticated user, including timezone, notification settings, work hours, and language.
+
+<CodeGroup>
+
+```bash get-profile
+curl http://localhost:3002/api/me/preferences \
+  -H "Authorization: Bearer eyJhbGci..."
+```
+
+</CodeGroup>
+
+<ResponseField name="timezone" type="string">
+  IANA timezone name (e.g. `"Asia/Kolkata"`). Used to schedule notifications in local time.
+</ResponseField>
+
+<ResponseField name="dailyNudgeEnabled" type="boolean">
+  Whether the evening nudge notification is active.
+</ResponseField>
+
+<ResponseField name="dailyNudgeHour" type="number">
+  Local hour (0–23) at which the evening nudge fires. Default: `19`.
+</ResponseField>
+
+<ResponseField name="morningBriefEnabled" type="boolean">
+  Whether the morning brief notification is active.
+</ResponseField>
+
+<ResponseField name="morningBriefHour" type="number">
+  Local hour (0–23) for the morning brief. Default: `8`.
+</ResponseField>
+
+<ResponseField name="language" type="string">
+  Interface language. `"en"` (English) or `"hi"` (Hindi).
+</ResponseField>
+
+<ResponseField name="workDays" type="number[]">
+  Days of the working week as integers (0 = Sunday … 6 = Saturday). Default: `[1,2,3,4,5]`.
+</ResponseField>
+
+<ResponseField name="workStartHour" type="number">
+  Start of the working day, local hour (0–23). Default: `9`.
+</ResponseField>
+
+<ResponseField name="workEndHour" type="number">
+  End of the working day, local hour (1–24). Default: `18`. Must be greater than `workStartHour`.
+</ResponseField>
+
+### Update preferences
+
+`PATCH /api/me/preferences` accepts any subset of the preference fields. All fields are optional — only supplied fields are updated.
+
+<CodeGroup>
+
+```bash update-preferences
+curl -X PATCH http://localhost:3002/api/me/preferences \
+  -H "Authorization: Bearer eyJhbGci..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "timezone": "America/New_York",
+    "dailyNudgeEnabled": true,
+    "dailyNudgeHour": 20
+  }'
+```
+
+</CodeGroup>
+
+<ParamField body="timezone" type="string">
+  IANA timezone name. Validated against `Intl.DateTimeFormat` — an unrecognised zone returns `400 unknown_timezone`.
+</ParamField>
+
+<ParamField body="dailyNudgeEnabled" type="boolean">
+  Enable or disable the evening nudge.
+</ParamField>
+
+<ParamField body="dailyNudgeHour" type="number">
+  Hour for the evening nudge. Integer 0–23.
+</ParamField>
+
+<ParamField body="morningBriefEnabled" type="boolean">
+  Enable or disable the morning brief.
+</ParamField>
+
+<ParamField body="morningBriefHour" type="number">
+  Hour for the morning brief. Integer 0–23.
+</ParamField>
+
+<ParamField body="language" type="string">
+  `"en"` or `"hi"`.
+</ParamField>
+
+<ParamField body="workDays" type="number[]">
+  Array of weekday integers (0–6). Duplicates are removed automatically.
+</ParamField>
+
+<ParamField body="workStartHour" type="number">
+  Integer 0–23. Must be less than `workEndHour` (checked against the stored value when only one end is supplied).
+</ParamField>
+
+<ParamField body="workEndHour" type="number">
+  Integer 1–24. Must be greater than `workStartHour`.
+</ParamField>
+
+<ParamField body="followupPrompts" type="boolean">
+  Whether to send a "any follow-ups?" notification when a meeting ends.
+</ParamField>
+
+<ParamField body="prepPrompts" type="boolean">
+  Whether to send a "before your meeting" notification with open items from last time.
+</ParamField>
+
+<ParamField body="homeCity" type="string | null">
+  The city you live in. Plans in this city are not treated as trips.
+</ParamField>
+
+<ParamField body="reportEnabled" type="boolean">
+  Whether to send an evening reminder to dispatch the daily report.
+</ParamField>
+
+<ParamField body="reportHour" type="number">
+  Hour for the daily report reminder. Integer 0–23.
+</ParamField>
+
+<ParamField body="reportToName" type="string | null">
+  Name to greet in the report.
+</ParamField>
+
+<ParamField body="reportToEmail" type="string | null">
+  Email address the report is sent to. Must be a valid email if supplied.
+</ParamField>
+
+### Update display name and timezone (profile shortcut)
+
+`PATCH /api/auth/profile` is a lighter endpoint that updates only `name` and `timezone`:
+
+<CodeGroup>
+
+```bash update-profile
+curl -X PATCH http://localhost:3002/api/auth/profile \
+  -H "Authorization: Bearer eyJhbGci..." \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice Smith", "timezone": "Asia/Kolkata"}'
+```
+
+</CodeGroup>
+
+<ParamField body="name" type="string">
+  New display name. Leading/trailing whitespace is trimmed.
+</ParamField>
+
+<ParamField body="timezone" type="string">
+  IANA timezone name.
+</ParamField>
+
+---
+
+## Delete Account
+
+`DELETE /api/auth/me` permanently removes the account. Connected Google and Microsoft accounts are revoked with the provider first so Cue retains no standing access. A password confirmation is required (except for demo accounts).
+
+```http
+DELETE /api/auth/me
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "password": "current-password" }
+```
+
+If the user is the **only member** of the org, the org and all its data are deleted. If others remain, only this user's row is removed.
+
+| Status | `error` | Cause |
+|---|---|---|
+| `403` | `wrong_password` | Password confirmation did not match |
+| `404` | `not_found` | User record not found (edge case on demo accounts) |

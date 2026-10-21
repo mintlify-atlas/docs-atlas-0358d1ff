@@ -1,0 +1,159 @@
+---
+title: "Testing Strategy — Unit, Web Scripts, and API Against Real PostgreSQL"
+sidebarTitle: "Testing"
+description: "Cue runs three test suites: pure-function unit tests, web script tests, and API integration tests against a real PostgreSQL database — no mocks for the data layer."
+---
+
+Cue has three test suites, each targeting a different layer of the codebase. They run in sequence under a single command, use Node's built-in `node:test` runner via `tsx`, and require no additional test framework setup. The API suite is the most important: it runs against a real PostgreSQL instance, not a mock or an in-memory substitute.
+
+## Running the Tests
+
+```bash
+npm test
+```
+
+This is equivalent to running all three suites in order:
+
+```bash
+npm run test:unit && npm run test:web && npm run test:api
+```
+
+<Note>
+  `DATABASE_URL` must point to a running PostgreSQL instance before the API tests can run. The tests create and drop their own schemas — they do not touch any existing tables.
+</Note>
+
+## The Three Suites
+
+<Tabs>
+  <Tab title="test:unit">
+    **Command:** `tsx --test packages/shared/src/*.test.ts`
+
+    Tests pure functions in `packages/shared/src` — the parsers, recurrence rules, and Hindi translation tables. No database, no network, no side effects. These are the fastest tests in the project.
+
+    **What is covered:**
+    - `parseWhen` — 29 cases covering every date and time convention: weekdays, `tomorrow`, `in 3 days`, `next week`, `25 dec`, day-first `5/9`, 12- and 24-hour clocks, parts of the day (`shaam`, `subah`), and `for 45 min`
+    - Recurrence rules — `every tuesday`, `last day of every month`, `second tuesday of the month`, `every other friday until 15 December`
+    - Hindi/Hinglish normalisation tables — Devanagari and Roman time words mapped to their English equivalents before any parser runs
+
+    Run a single test file directly:
+
+    ```bash
+    tsx --test packages/shared/src/parseWhen.test.ts
+    ```
+  </Tab>
+
+  <Tab title="test:web">
+    **Command:** `tsx --test apps/web/scripts/*.test.ts`
+
+    Tests the web app's supporting scripts and invariants. Also no database.
+
+    **What is covered:**
+    - `i18n-check` — every `t()`, `msg()`, and `rich()` string has a Hindi translation with matching `{placeholders}` and tags; no unused entries; no conflicting translations across areas
+    - Legal text parity — the privacy policy and terms of service are checked to exist in both English and Hindi
+    - Share target — the `/share` URL handler is verified against the web manifest
+    - Shared labels — constants shared between the API and web are consistent
+  </Tab>
+
+  <Tab title="test:api">
+    **Command:** `tsx --test --test-concurrency=1 "apps/api/src/**/*.test.ts"`
+
+    Tests the API services and routes against a **real PostgreSQL database**. Concurrency is set to `1` to prevent multiple test files from racing on schema creation.
+
+    **What each test file does:**
+    1. Calls `createTestDb(label)` from the test harness to create an isolated schema
+    2. Applies **all real migrations** into that schema in order
+    3. Runs its assertions against a fully migrated database
+    4. Drops the schema in an `after()` hook
+
+    Run a single API test file:
+
+    ```bash
+    tsx --test apps/api/src/routes/commitments.test.ts
+    ```
+  </Tab>
+</Tabs>
+
+## Why Real PostgreSQL, Not Mocks
+
+Every API bug found by hand in this project lived in the layer a mock would have faked away. The test harness is explicit about this:
+
+> *"Every API bug found by hand in this project lived in the layer a mock would have faked away: a unique index that collided, a check constraint that fired, a cascade that did or did not reach. Testing against anything but the real schema would have caught none of them."*
+
+Two bugs were discovered immediately when the API tests were first written — neither had been caught by any amount of clicking:
+
+<CardGroup cols={2}>
+  <Card title="Bug 1: Migrations couldn't build from scratch" icon="triangle-exclamation">
+    There was no migration creating `orgs`, `users`, or `commitments` — those tables had been created by `drizzle-kit push` before it was replaced. Every migration from `0001` assumed they existed. Running `db:migrate` on a fresh database failed at `0001` with `relation "commitments" does not exist`. **Fixed by `0000_base_schema.sql`.**
+  </Card>
+  <Card title="Bug 2: Multi-day bookings invisible from day 2+" icon="triangle-exclamation">
+    The clash-detection query fetched commitments *starting* within twelve hours of the proposed slot. A conference running Monday through Wednesday clashed with nothing booked on Tuesday. The query now tests for **overlap**, not start time.
+  </Card>
+</CardGroup>
+
+## The Test Harness
+
+`apps/api/src/testing/harness.ts` provides two exports:
+
+```ts
+// Creates an isolated schema, applies all migrations, returns a connection.
+export async function createTestDb(label: string): Promise<Harness>
+
+// Inserts a minimal org + user row — the minimum any commitment needs.
+export async function seedUser(sql: postgres.Sql, email?: string): Promise<Seeded>
+```
+
+### A minimal API test
+
+```ts
+import { before, after, it } from 'node:test'
+import assert from 'node:assert/strict'
+import { createTestDb, seedUser } from '../testing/harness.ts'
+
+let h: Harness
+
+before(async () => {
+  h = await createTestDb('my_feature')       // fresh schema, all migrations applied
+  process.env.DATABASE_URL = h.url           // set before importing anything DB-related
+  const { orgId, userId } = await seedUser(h.sql, 'asha@test.local')
+  // … set up your test data
+})
+
+after(() => h.close())                        // drops the schema, closes connections
+```
+
+<Note>
+  Set `process.env.DATABASE_URL = h.url` **before** importing any module that opens a database connection. The harness sets the `search_path` in the URL so all unqualified table names resolve inside the test schema.
+</Note>
+
+### Schema isolation without CREATEDB
+
+The harness creates a **schema** inside the existing database, not a separate database. This means the tests run with exactly the same permissions the application already has — no `CREATEDB` privilege required.
+
+Stale schemas from interrupted test runs (Ctrl-C, timeout) are swept after two hours. Staleness is judged by age, not by process ID, so a CI runner and a laptop can share the same database safely.
+
+### Injecting time and push
+
+Pass `now` explicitly into services rather than relying on `Date.now()`, and inject a `send` function where a service accepts it:
+
+```ts
+const sent: unknown[] = []
+const send = (userId: string, payload: object) => { sent.push(payload) }
+
+await runReminderWorker({ now: new Date('2026-10-14T09:00:00Z'), send })
+
+assert.equal(sent.length, 1)
+```
+
+Most notification services in Cue accept both parameters, making them testable without a real push endpoint.
+
+## A Throwaway Database for Tests
+
+If you want to keep test runs completely isolated from your development database, spin up a scratch PostgreSQL cluster on a different port:
+
+```bash
+initdb -D /tmp/pgdata -U postgres --auth=trust
+pg_ctl -D /tmp/pgdata -o "-p 5499 -c listen_addresses=localhost" -l /tmp/pg.log start
+createdb -h localhost -p 5499 -U postgres cue
+DATABASE_URL=postgres://postgres@localhost:5499/cue npm run db:migrate   # CUE_NEW_DATABASE=1 on first run
+DATABASE_URL=postgres://postgres@localhost:5499/cue npm run test:api
+```

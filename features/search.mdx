@@ -1,0 +1,245 @@
+---
+title: "Search Everything in Your Planner at Once"
+sidebarTitle: "Search"
+description: "Cue's unified search covers commitments, notes, trips, intentions, contacts, places, recurring plans, and visit logs — opened with Ctrl/Cmd+K or a bare /."
+---
+
+Every plan you enter, every visit you log, every person you note down, every trip you plan — all of it was write-only until you searched for it. One box across every table that holds words means "what did I agree with Ramesh?" is answerable in the same breath as asking it.
+
+## Opening search
+
+Search lives in the top bar as a bordered control with a magnifier icon. It does not steal focus when the page loads — someone opening their day came to read it, not to type. Two ways to open it from the keyboard:
+
+- **`Ctrl`+`K`** (Windows/Linux) or **`Cmd`+`K`** (Mac)
+- A bare **`/`** anywhere on the page
+
+On mobile the icon is shown without a label (the bar is tight and there is no keyboard shortcut to advertise).
+
+## What is searched
+
+<CardGroup cols={2}>
+  <Card title="Commitments & notes" icon="calendar-check">
+    Plans by title, notes text, and place label. A repeating plan appears once (its next upcoming occurrence) rather than once per occurrence.
+  </Card>
+  <Card title="Trips" icon="plane">
+    Trips by destination label and notes.
+  </Card>
+  <Card title="Saved intentions" icon="bookmark">
+    Dateless wishes saved for a place ("when I go to Mathura"), searchable by title, place, and notes.
+  </Card>
+  <Card title="Contacts" icon="address-book">
+    People by name, role, organisation, phone number, and notes.
+  </Card>
+  <Card title="Places" icon="location-dot">
+    Saved places by name, address, and category.
+  </Card>
+  <Card title="Recurring plans" icon="repeat">
+    Series by title and notes — finds the rule, not individual occurrences.
+  </Card>
+  <Card title="Visit logs" icon="clock-rotate-left">
+    Logged visits by outcome, contact name, and notes.
+  </Card>
+</CardGroup>
+
+## How search works
+
+Cue uses plain `ILIKE` — a case-insensitive substring match — rather than full-text search. No PostgreSQL extension, no index to maintain, no stemming surprises ("running" matching "run"), and at the scale of one person's calendar the difference in speed is unmeasurable.
+
+### SQL ranking, not post-fetch ranking
+
+Ranking happens **inside the SQL query**, not after the rows come back. This matters because each table is limited to 8 results before the union. If ranking happened after fetching, the best hit could be cut by the per-table limit before anyone ranked it.
+
+The score function is straightforward:
+
+| Match type | Score |
+|-----------|-------|
+| Exact match (case-insensitive) | 100 |
+| Starts with query | 70 |
+| Contains query anywhere | 40 |
+
+Within the same score, results nearer to today sort first — a dentist appointment next week beats one from two years ago.
+
+### One round trip
+
+All seven entity types are queried in a single SQL `UNION ALL` with a shared ranking and limit. One database round trip per keystroke, regardless of how many types are searched. The full query is in `services/search.ts` and is the only file that needs to change if the approach is ever upgraded (for example, to `pg_trgm`).
+
+## API
+
+<CodeGroup>
+
+```bash Search across all entity types
+GET /api/search?q=dentist
+Authorization: Bearer <token>
+```
+
+</CodeGroup>
+
+### Request
+
+| Parameter | Description |
+|-----------|-------------|
+| `q` | Search query, 2–200 characters. Fewer than 2 characters returns an empty result immediately. |
+
+### Response
+
+```json
+{
+  "hits": [
+    {
+      "kind": "commitment",
+      "id": "uuid",
+      "title": "Dentist checkup",
+      "when": "2025-10-08T10:00:00.000Z",
+      "detail": "Sunrise Dental Clinic",
+      "href": "/?edit=uuid",
+      "score": 70
+    },
+    {
+      "kind": "contact",
+      "id": "uuid",
+      "title": "Dr. Priya Sharma",
+      "when": null,
+      "detail": "Dentist · Sunrise Dental Clinic · 98765 43210",
+      "href": "/people",
+      "score": 40
+    }
+  ],
+  "truncated": false
+}
+```
+
+`truncated` is `true` when 60 or more hits were found (the hard cap) — a signal to narrow the query. Each hit carries an `href` so the client can navigate directly to the right screen.
+
+---
+
+## Daily insights
+
+`GET /api/insights` reads the same data the planner holds and reports what stands out. The brief shows at the top of Today automatically; the same endpoint powers it.
+
+<Note>
+  **Restraint is the design principle.** An empty account is told nothing — not reassured, not given placeholder copy. Six overdue items spread across six different weekdays is noise, not a Tuesday problem, and goes unremarked. A panel that manufactures observations teaches people to skip it.
+</Note>
+
+### What the insights cover
+
+<Accordion title="Overdue and stuck items">
+  Items past their due time with pending status. Displayed with the oldest and how many days it has been waiting.
+
+  A separate "stuck" signal fires when items have been past-due for more than 5 days or have exhausted their reminder chain — the reminders stopped working, which is different from merely being late.
+</Accordion>
+
+<Accordion title="Day shape — how full today really is">
+  Percentage of working hours (8am–9pm) committed to fixed items, free minutes remaining, and the longest clear run. Once today's fixed events are over and the count drops to zero, the brief rolls forward to tomorrow automatically.
+
+  **A 0% dial at 8pm is accurate and worth nothing.** The brief always describes the next meaningful day — today if it still has items, tomorrow once it is effectively over.
+</Accordion>
+
+<Accordion title="Travel conflicts">
+  Two fixed plans in different places with a gap too small to get between them. Cue estimates travel time as straight-line distance × 1.35 (for winding roads) ÷ `TRAVEL_SPEED_KMH` (default 45 km/h) + 30 minutes overhead. The insight says this is an estimate, not a routed journey.
+
+  Under 25 km apart is considered the same town and not worth a warning.
+</Accordion>
+
+<Accordion title="Trips with saved intentions">
+  A trip coming up with dateless wishes saved for that place. Shows how many days away the trip is and what is waiting. Only fires when there is actually something waiting — a trip with no intentions says nothing.
+</Accordion>
+
+<Accordion title="Drop pattern — which weekday things slip on">
+  If 40% or more of the last two months' dropped items fell on one weekday, and that is at least 3 items, the brief names it. Six misses spread evenly across six days is noise and goes unsaid.
+</Accordion>
+
+<Accordion title="Bills and renewals">
+  Overdue bills (urgent), bills due within their reminder window (warning), and expiring renewals. Each carries the amount and due date.
+</Accordion>
+
+<Accordion title="Positive signal">
+  Items closed out in the last week. Shows when nothing is overdue behind you — "that is the whole idea."
+</Accordion>
+
+### The summary strip
+
+The `/api/insights` response also includes a `summary` object with numbers for the strip across the top of the dashboard:
+
+```json
+{
+  "summary": {
+    "subject": "today",
+    "percentBooked": 42,
+    "freeMinutes": 312,
+    "todayCount": 3,
+    "nextGap": {
+      "from": "2025-10-03T12:00:00.000Z",
+      "to": "2025-10-03T17:30:00.000Z"
+    },
+    "overdue": 1,
+    "weekAhead": 8,
+    "waiting": 3,
+    "waitingOnOthers": 2,
+    "checkInsDue": 1
+  }
+}
+```
+
+`subject` is `"today"` while today still has items; `"tomorrow"` once it effectively has none (after 6pm with nothing left, or simply an empty day).
+
+### Morning brief
+
+A push notification arrives each morning with the day's shape — how booked it is, what is overdue, and what is next. Enabled by default, configurable hour. The notification links to `/?triage=all` so you can act on anything stuck, or to the main view if everything is clear.
+
+## Full example: search and insights in one session
+
+<Steps>
+  <Step title="Open search">
+    Press `Ctrl`+`K`. The search box appears. Type `dentist`.
+  </Step>
+  <Step title="Read the hits">
+    ```json
+    GET /api/search?q=dentist
+
+    {
+      "hits": [
+        { "kind": "commitment", "title": "Dentist checkup", "when": "2025-10-08T10:00:00Z", "score": 70 },
+        { "kind": "contact",    "title": "Dr. Priya Sharma", "detail": "Dentist · 98765 43210", "score": 40 },
+        { "kind": "place",      "title": "Sunrise Dental Clinic", "detail": "MG Road, Bengaluru", "score": 40 }
+      ],
+      "truncated": false
+    }
+    ```
+  </Step>
+  <Step title="Load today's brief">
+    ```json
+    GET /api/insights
+
+    {
+      "insights": [
+        {
+          "id": "today-shape",
+          "tone": "neutral",
+          "headline": "Today is 42% booked — 5.2 hours still free",
+          "detail": "3 fixed things, and your longest clear run is 12:00 PM to 5:30 PM.",
+          "weight": 70
+        },
+        {
+          "id": "trip-uuid",
+          "tone": "opportunity",
+          "headline": "3 things waiting for Mathura",
+          "detail": "You are there in 5 days: Buy peda, Visit Banke Bihari Temple, Visit the local market.",
+          "action": { "label": "See the trip", "href": "/trips?trip=uuid" },
+          "weight": 85
+        }
+      ],
+      "summary": {
+        "subject": "today",
+        "percentBooked": 42,
+        "freeMinutes": 312,
+        "todayCount": 3,
+        "overdue": 0,
+        "weekAhead": 8
+      },
+      "sample": false
+    }
+    ```
+  </Step>
+</Steps>
+
+Each insight carries its evidence — the specific titles, times, and counts it was drawn from — so any observation can be checked rather than just trusted.

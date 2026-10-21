@@ -1,0 +1,170 @@
+---
+title: "Build the Cue Android App with Bubblewrap TWA"
+sidebarTitle: "Android"
+description: "Cue ships as a Trusted Web Activity (TWA) via Bubblewrap — the Android app is the same React PWA, with native geolocation and notification support via Capacitor."
+---
+
+Cue's Android app is not a separate codebase. It is a thin Android shell — a Trusted Web Activity — that displays the same React PWA full-screen, with no browser chrome. Every change deployed to the website is in the Android app the moment it goes live. A new app build is only needed when something in the shell itself changes: the package name, icons, shortcuts, or the Android version number.
+
+## What a Trusted Web Activity Is
+
+A TWA is the same website opened as a native Android app. The Android shell renders the PWA at full screen with no address bar, no browser tabs, no navigation buttons from Chrome. To Android and its user it looks and feels like a native app. The actual web code — React, Vite, the service worker, the offline outbox — is unchanged.
+
+```
+Android app (in.vitelio.cue)
+  └── Trusted Web Activity shell (Bubblewrap)
+        └── https://cue.vitelio.in  ← the same PWA everyone else uses
+```
+
+## Two Apps
+
+| Package | Name | Launch URL |
+| --- | --- | --- |
+| `in.vitelio.cue` | Cue | `https://cue.vitelio.in/` |
+| `in.vitelio.cue.exams` | Cue Exams | `https://cue.vitelio.in/exams?app=exams` |
+
+Both apps use the same server and database. A user with both apps signs into the same account in each. Cue Exams puts the site into exams mode — its own welcome page (Hindi first), a different header title, and new accounts that start with the exams use selected. Everything else — plans, reminders, people, history — is shared.
+
+## The TWA Manifest
+
+`android/twa-manifest.json` is the source of truth for the Android shell. Bubblewrap reads it to generate the Android project. Key fields:
+
+```json
+{
+  "packageId": "in.vitelio.cue",
+  "host": "cue.vitelio.in",
+  "name": "Cue — say it once, Cue remembers the rest",
+  "launcherName": "Cue",
+  "startUrl": "/",
+  "minSdkVersion": 24,
+  "shortcuts": [
+    { "name": "Speak a reminder", "url": "/?capture=voice" },
+    { "name": "Add something",    "url": "/?capture=1" },
+    { "name": "Log a call",       "url": "/?logcall=1" }
+  ]
+}
+```
+
+The share target (`GET /share`) is also declared here, allowing text shared from other Android apps — WhatsApp messages, SMS, links — to open directly in Cue's capture box.
+
+## Digital Asset Links
+
+Digital Asset Links (`/.well-known/assetlinks.json`) is the mechanism that tells Android the app and the website trust each other. Without it, Android opens the site in Chrome with an address bar visible — the TWA full-screen mode is only activated when the site has vouched for the app's signing key.
+
+The API generates and serves this file from two environment variables:
+
+```ini
+ANDROID_PACKAGE=in.vitelio.cue
+ANDROID_CERT_SHA256=AA:BB:CC:…,DD:EE:FF:…
+```
+
+`ANDROID_CERT_SHA256` is a comma-separated list of SHA-256 fingerprints. You need **both** the Play app-signing key fingerprint and the upload key fingerprint, because Play re-signs the app with its own key after you upload it.
+
+<Steps>
+  <Step title="Upload your release bundle to Play">
+    After uploading the AAB, go to Play Console → Test and release → App integrity → App signing.
+  </Step>
+  <Step title="Copy both SHA-256 fingerprints">
+    Copy the **app signing key** fingerprint and the **upload key** fingerprint.
+  </Step>
+  <Step title="Set them in .env on the server">
+    ```ini
+    ANDROID_CERT_SHA256=AA:BB:…,CC:DD:…
+    ```
+  </Step>
+  <Step title="Restart the server">
+    ```bash
+    sudo systemctl restart cue
+    ```
+    Then verify the file is being served:
+    ```bash
+    curl https://cue.vitelio.in/.well-known/assetlinks.json
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Without valid `ANDROID_CERT_SHA256` entries, the app will open with a visible Chrome address bar at the top. This is expected for test builds signed with a throwaway key; it is not expected for a Play-installed release.
+</Warning>
+
+## Building the App
+
+The GitHub Actions workflow at `.github/workflows/android.yml` handles the build.
+
+<Tabs>
+  <Tab title="Test build (no key needed)">
+    Run the workflow without enabling the *release* option. GitHub creates a throwaway signing key for this run and produces an APK you can install directly on any Android device:
+
+    1. GitHub → Actions → **Android app** → Run workflow (leave *release* off)
+    2. Download the **cue-test-build** artifact
+    3. Copy `app-release-signed.apk` to an Android phone and allow the install
+
+    The test APK is signed with a key that is discarded after the run. It can never be uploaded to Play, and every run produces a different key. The app will show a Chrome address bar unless you temporarily add that run's SHA-256 fingerprint to `ANDROID_CERT_SHA256` on the server.
+  </Tab>
+
+  <Tab title="Release build (for Play)">
+    First, create an upload key and store it as a GitHub secret (once):
+
+    ```bash
+    keytool -genkeypair -keystore cue-upload.keystore \
+      -alias cue -keyalg RSA -keysize 2048 -validity 10000
+    ```
+
+    Add these repository secrets:
+
+    | Secret | Value |
+    | --- | --- |
+    | `ANDROID_KEYSTORE_BASE64` | The keystore file, base64-encoded |
+    | `ANDROID_KEYSTORE_PASSWORD` | Its password |
+    | `ANDROID_KEY_PASSWORD` | The key's password (if different from the keystore password) |
+
+    Then run the workflow with *release* on. Download the **cue-release** artifact and upload `app-release-bundle.aab` to Play Console → Internal testing.
+  </Tab>
+</Tabs>
+
+## Play Store Listing Assets
+
+Store listing assets live in two places:
+
+| Path | Contents |
+| --- | --- |
+| `apps/web/public/store/` | Screenshots (`phone-1..4.png`), feature graphic |
+| `apps/web/public/icon-512.png` | App icon for Play |
+| `android/store/listing.md` | Store description text |
+| `android/store/data-safety.md` | Data safety questionnaire answers |
+
+## The Capacitor Path for Background Location
+
+One of the most significant differences between the web version and a native Android app is **background geolocation**. A browser can only report location while the page is open and visible — it cannot detect that you parked at a clinic for 35 minutes while your phone was in your pocket.
+
+The web version handles this by asking "where are you now?" when you open the app. The Android version can do better with the Capacitor background-geolocation plugin.
+
+The integration point is designed to be a clean swap:
+
+<Card title="apps/web/src/lib/geo.ts" icon="map-pin">
+  This file is the single seam for all location access in the web app. Wrapping the codebase with [Capacitor](https://capacitorjs.com) and a background-geolocation plugin replaces **only this module** — the rest of the codebase is untouched, and the web version keeps working unchanged.
+</Card>
+
+This architecture means:
+- No rewrite required for native geofencing
+- The web version and Android version share all logic above the geo layer
+- Background location for arrival detection becomes available in the Android build
+- The `capacitor://localhost` origin is already in the API's CORS allow-list for Capacitor requests
+
+<Note>
+  Android requires the **background location** permission to detect arrivals without the app being open. The OS will prompt the user explicitly for this permission — it is not granted with the normal location permission. The web version asks "where are you now?" on open instead, which is the honest substitute for a browser.
+</Note>
+
+## Releasing a New Version
+
+The website itself never needs a new app build — changes deploy to the website and appear in the TWA immediately. Only these changes need a new build:
+
+- Incrementing `appVersionCode` or `appVersionName` in `twa-manifest.json`
+- Changing the package name, icon, theme colour, or shortcuts
+
+To cut a release:
+
+1. Increment `appVersionCode` by one (and update `appVersionName`, e.g. `1.0.1`) in `twa-manifest.json`
+2. Commit and push
+3. Run the GitHub Actions release build
+4. Upload the new `.aab` to Play Console

@@ -1,0 +1,228 @@
+---
+title: "Insights API — Daily Brief, Triage, and Free Slots"
+sidebarTitle: "Insights"
+description: "GET /api/insights returns the day's brief — completion percentage, impossible journeys, pattern observations, and free time windows — with evidence for every finding."
+---
+
+The Insights API surfaces what Cue has noticed about your schedule and habits. Every finding comes with evidence — the raw counts or events behind it — so nothing feels like a black box. The guiding principle is restraint: an empty account gets nothing, a pattern that only happened once is not a pattern, and a Tuesday with six misses across six weeks is not a Tuesday problem unless it looks like one from more than one angle.
+
+The brief rolls forward to tomorrow after 6 pm, so you are always looking at the most actionable window.
+
+## Endpoints
+
+### `GET /api/insights`
+
+Returns the day's brief and the list of active insights in one call. One call rather than two because the dashboard shows them together and a half-loaded header is worse than a slightly slower one.
+
+**Response**
+
+<ResponseField name="summary" type="object">
+  The day's brief — a snapshot of how today is going.
+
+  <Expandable title="summary fields">
+    <ResponseField name="date" type="string">The day this covers (today or tomorrow, depending on time of day).</ResponseField>
+    <ResponseField name="completedToday" type="number">Commitments marked done today.</ResponseField>
+    <ResponseField name="totalToday" type="number">Commitments that were on today's agenda.</ResponseField>
+    <ResponseField name="overdueCount" type="number">Pending items past their due time.</ResponseField>
+    <ResponseField name="upcomingCount" type="number">Pending items due in the next day or two.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="insights" type="Insight[]">
+  Zero or more findings. Each has the following shape:
+
+  <Expandable title="insight fields">
+    <ResponseField name="type" type="string">
+      What kind of finding this is. One of:
+      - `impossible_journey` — two back-to-back plans that are physically unreachable given travel time.
+      - `friday_slippage` — plans consistently move from Friday to the following week.
+      - `trip_wishes` — you have saved intentions for a destination where a trip is coming up.
+      - `free_window` — a gap in the day large enough to schedule something flexible.
+      - `overdue_count` — several items are significantly overdue.
+    </ResponseField>
+    <ResponseField name="summary" type="string">One sentence: what was found.</ResponseField>
+    <ResponseField name="evidence" type="string">The data behind it: counts, names, or dates.</ResponseField>
+    <ResponseField name="severity" type="string">One of `info`, `warning`, `critical`.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="sample" type="boolean">
+  `true` when the account is running on sample data (loaded via `POST /api/sample-day`).
+</ResponseField>
+
+<CodeGroup>
+```bash get-insights
+curl http://localhost:3002/api/insights \
+  -H "Authorization: Bearer <token>"
+```
+
+```json insights-response
+{
+  "summary": {
+    "date": "2026-10-15",
+    "completedToday": 2,
+    "totalToday": 5,
+    "overdueCount": 3,
+    "upcomingCount": 2
+  },
+  "insights": [
+    {
+      "type": "impossible_journey",
+      "summary": "Not enough time between Mehta Clinic and BKC office",
+      "evidence": "Mehta Clinic ends at 5:30 pm; BKC office starts at 5:45 pm — 30 min travel needed.",
+      "severity": "warning"
+    },
+    {
+      "type": "free_window",
+      "summary": "90-minute gap this afternoon",
+      "evidence": "Free from 2:00 pm to 3:30 pm — fits 3 flexible items.",
+      "severity": "info"
+    }
+  ],
+  "sample": false
+}
+```
+</CodeGroup>
+
+---
+
+### `GET /api/triage`
+
+Returns items that have stopped moving, each with a diagnosis and a suggested action. Writes nothing.
+
+**Query parameters**
+
+<ParamField query="all" type="string">
+  Set to `"1"` to include items that are merely late, not just the stuck ones.
+</ParamField>
+
+**Response**
+
+<ResponseField name="stuck" type="StuckItem[]">
+  Items whose pattern suggests they are not just late — they are not happening.
+
+  <Expandable title="stuck item fields">
+    <ResponseField name="commitment" type="CommitmentDTO">The commitment in question.</ResponseField>
+    <ResponseField name="diagnosis" type="string">
+      Why Cue thinks this is stuck — e.g. `"Moved 4 times in 3 weeks"`, `"No fixed time — keeps being bumped by fixed items"`.
+    </ResponseField>
+    <ResponseField name="suggestion" type="string">
+      What to do with it. One of:
+      - `already_done` — likely completed but never marked.
+      - `give_slot` — needs a real, fixed time to actually happen.
+      - `no_deadline` — no consequences if it stays undone; drop or deprioritise.
+      - `not_happening` — evidence suggests this will never be done; drop it.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="merely_late" type="number">
+  Count of items that are overdue but not yet showing the stuck pattern.
+</ResponseField>
+
+<CodeGroup>
+```bash triage
+curl http://localhost:3002/api/triage \
+  -H "Authorization: Bearer <token>"
+```
+
+```json triage-response
+{
+  "stuck": [
+    {
+      "commitment": {
+        "id": "abc123",
+        "title": "Call insurance company",
+        "dueAt": "2026-09-01T10:00:00Z",
+        "status": "pending"
+      },
+      "diagnosis": "Moved 5 times in 6 weeks",
+      "suggestion": "give_slot"
+    }
+  ],
+  "merely_late": 2
+}
+```
+</CodeGroup>
+
+---
+
+### `POST /api/triage`
+
+Applies decisions from the triage review. Each decision names an item and the action to take.
+
+**Request body**
+
+<ParamField body="decisions" type="object[]" required>
+  Up to 100 decisions.
+
+  <Expandable title="decision fields">
+    <ParamField body="decisions[].id" type="string" required>UUID of the commitment.</ParamField>
+    <ParamField body="decisions[].action" type="string" required>
+      One of `done`, `reschedule`, `someday`, `drop`.
+      - `done` — mark it completed.
+      - `reschedule` — move it to `at`.
+      - `someday` — make it flexible with no fixed time.
+      - `drop` — soft-delete it.
+    </ParamField>
+    <ParamField body="decisions[].at" type="string">ISO 8601 datetime — required when `action` is `reschedule`.</ParamField>
+  </Expandable>
+</ParamField>
+
+**Response** — `{ applied: number }` — count of decisions successfully applied.
+
+---
+
+### `GET /api/plan/tomorrow`
+
+Returns what tomorrow could look like — flexible items that could be slotted in and when. Writes nothing.
+
+**Response** — array of schedule proposals, each with a `commitmentId` and a suggested `at` time.
+
+---
+
+### `POST /api/plan/tomorrow`
+
+Accepts a proposed schedule from `GET /api/plan/tomorrow`. Only the named rows are updated, and only if they are still unscheduled.
+
+**Request body**
+
+<ParamField body="proposals" type="object[]" required>
+  Up to 50 proposals.
+
+  <Expandable title="proposal fields">
+    <ParamField body="proposals[].commitmentId" type="string" required>UUID of the commitment to schedule.</ParamField>
+    <ParamField body="proposals[].at" type="string" required>ISO 8601 datetime — the suggested time to accept.</ParamField>
+  </Expandable>
+</ParamField>
+
+**Response** — `{ applied: number }`.
+
+---
+
+## Sample day
+
+### `POST /api/sample-day`
+
+Fills the account with a realistic week of sample data. Not a gimmick — every judgement Cue makes needs data before it has anything to say. Marked throughout so it can be removed cleanly.
+
+**Response** — `201` with a `report` of what was created.
+
+### `DELETE /api/sample-day`
+
+Removes all sample data.
+
+**Response** — `{ removed: number }`.
+
+---
+
+## Insight restraint principle
+
+Cue deliberately produces no insights for empty or sparse accounts. The thresholds are:
+
+- A pattern must repeat across multiple weeks before being surfaced.
+- A single bad day is never enough — the system looks for evidence across several data points.
+- "Free window" only appears when a gap is large enough to be genuinely useful.
+- Overdue count is only surfaced when it is large enough to warrant attention, not for a single late item.
+
+This means a new account sees nothing from Insights until enough history exists to say something true.

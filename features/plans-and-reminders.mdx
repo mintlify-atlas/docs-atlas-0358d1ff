@@ -1,0 +1,177 @@
+---
+title: "Plans, Reminders, and the Escalation Engine"
+sidebarTitle: "Plans & Reminders"
+description: "Every Cue plan queues a reminder chain that escalates until marked done, snoozed, or consciously cancelled — nothing is silently dropped."
+---
+
+Every plan Cue saves queues a reminder. That reminder fires at the due time, and if nothing happens — no Done, no Snooze, no Cancel — it fires again 15 minutes later. And again. The chain runs until someone acts, or until the escalation limit is reached and the plan lands in the **You dropped these** list, where it stays forever rather than being silently forgotten.
+
+## How reminders work
+
+<Steps>
+  <Step title="One row per attempt">
+    When a plan is saved, one row is inserted into the `reminders` table with `fire_at` set to the plan's due time and `status = 'pending'`.
+  </Step>
+  <Step title="Worker claims due rows">
+    The reminder worker polls every 20 seconds. It claims a batch of due reminders in one SQL statement using `FOR UPDATE SKIP LOCKED` — so several API instances running simultaneously never double-send the same notification.
+
+    ```sql
+    UPDATE reminders SET status = 'sending'
+    WHERE id IN (
+      SELECT id FROM reminders
+      WHERE status = 'pending' AND fire_at <= now()
+      ORDER BY fire_at ASC
+      LIMIT 50
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, org_id, commitment_id, attempt
+    ```
+  </Step>
+  <Step title="Push and re-queue">
+    After sending the push notification, the worker increments `escalation_count` on the commitment and inserts a new `reminders` row with `fire_at` set to 15 minutes from now (configurable via `ESCALATION_MINUTES`).
+  </Step>
+  <Step title="Chain exhaustion">
+    After `MAX_ESCALATIONS` attempts (default: 4), no new reminder row is inserted. The commitment stays in the **Overdue** list indefinitely — it is never silently dropped.
+  </Step>
+</Steps>
+
+<Note>
+  The worker polls every 20 seconds. This loop is the entire product: a planner that does not chase you is a list. Any hosting plan that sleeps the process when nobody is browsing will silently never remind you of anything.
+</Note>
+
+## Status lifecycle
+
+A commitment moves through a small set of statuses:
+
+```
+pending → done
+pending → cancelled
+pending → deleted   ("let go" — off the list but row survives)
+```
+
+<CodeGroup>
+```json title="Pending plan"
+{
+  "id": "c8a3f210-...",
+  "title": "Call the bank",
+  "status": "pending",
+  "dueAt": "2025-08-01T09:00:00.000Z",
+  "escalationCount": 0,
+  "flexibility": "fixed"
+}
+```
+
+```json title="After 2 reminder attempts"
+{
+  "id": "c8a3f210-...",
+  "title": "Call the bank",
+  "status": "pending",
+  "dueAt": "2025-08-01T09:00:00.000Z",
+  "escalationCount": 2,
+  "flexibility": "fixed"
+}
+```
+
+```json title="Marked done"
+{
+  "id": "c8a3f210-...",
+  "title": "Call the bank",
+  "status": "done",
+  "completedAt": "2025-08-01T09:47:00.000Z"
+}
+```
+</CodeGroup>
+
+### Marking done or cancelling
+
+Marking a plan **done** or **cancelled** immediately cancels all pending reminder rows for that commitment. No further pushes will arrive.
+
+**Snoozing** cancels the current chain and starts a fresh one from the new time. The `escalation_count` does not reset — a snooze is not a new plan, it is a deferral.
+
+### Editing a commitment's time
+
+Editing the due time:
+1. Re-runs the clash check (excluding itself, so moving by five minutes does not conflict with its own old slot)
+2. Cancels the old reminder chain
+3. Starts a fresh chain from the new time
+4. Resets `escalation_count` to 0 — you are not late for a time you just changed
+
+Setting `status` back to `pending` after `done` or `cancelled` starts the chain again.
+
+## Cancel vs Delete
+
+These were the same thing in early versions and should not have been.
+
+<CardGroup cols={2}>
+  <Card title="Cancel" icon="ban">
+    The plan stays on the calendar with a line through it — the slot is freed, reminders stop, the overdue count resets. The record survives; History shows it as **Cancelled**. Useful when a plan was called off but worth remembering.
+  </Card>
+  <Card title="Delete" icon="trash">
+    The plan disappears from lists, calendar, search, and contact screens. The row survives in the database with `status = 'deleted'`; History shows it as **Let go**. Used by Triage's **Not happening** action.
+  </Card>
+</CardGroup>
+
+The editor explains the difference at the moment of choosing, because it is not guessable from two buttons.
+
+<Note>
+  The single hard delete left is **Undo** straight after capture — undoing a two-second-old mistake should not leave a trail.
+</Note>
+
+## History timeline
+
+History is one timeline of everything that happened, sorted by **when it happened**, not when the row was written.
+
+| Tag | What it is |
+|-----|-----------|
+| **Logged** | A visit recorded after the fact |
+| **Done** | A plan you finished |
+| **Cancelled** | A plan you called off |
+| **Let go** | A plan you took off your list |
+
+A plan ticked off a week late belongs at the top of the timeline, not back where it was originally scheduled. Each terminal status records the moment it was decided (`completedAt`, `cancelledAt`, `deletedAt`) and the timeline uses that timestamp.
+
+## Triage — when the nagging fails
+
+`GET /api/triage` finds what has stopped moving and offers the four things that can actually be true.
+
+An item is considered **stuck** when it has been overdue for more than 5 days, or when `escalation_count >= MAX_ESCALATIONS` (even if only two days old). Items that are merely late are counted separately and said out loud — the framing stays honest.
+
+<Accordion title="Triage reasons and diagnoses">
+  | Reason | Diagnosis |
+  |--------|-----------|
+  | `chased-out` | "Chased 4 times and still open. The reminders are not working for this one." |
+  | `never-scheduled` | "It has never had a real time, so nothing ever forced the issue — 7 days now." |
+  | `bad-day` | "Due on a Friday, which is where your plans reliably slip." |
+  | `just-old` | "12 days past its time, and nothing has moved." |
+</Accordion>
+
+The `bad-day` reason looks back at overdue items from the last 90 days: a weekday is flagged only when it accounts for ≥ 40% of overdue items and at least 3 of them.
+
+### Triage actions
+
+| Action | What it does |
+|--------|-------------|
+| **Already did it** | Sets `status = 'done'`, cancels all pending reminders |
+| **Give it a real slot** | Moves to the next genuinely free hour, resets `escalation_count`, starts a fresh reminder chain |
+| **No deadline** | Sets `flexibility = 'flexible'`, cancels reminders — still yours, stops buzzing |
+| **Not happening** | Sets `status = 'deleted'` — off your list, row survives as "Let go" in History |
+
+**What it suggests scales with how stuck the thing is.** Merely old is worth another go (`reschedule`). Chased out is `someday` — stop pretending it has a deadline. More than 21 days past *and* chased out is `drop`.
+
+Proposed free slots are consumed as they are handed out — the first version offered all four stuck items the same free hour, so accepting the lot would have booked them on top of each other. Each `suggestedAt` is marked as claimed before the next item is considered.
+
+## Move it — overdue card free slots
+
+An overdue card offers **Move it** instead of snooze options, proposing three times that are genuinely free:
+
+```
+Next 30 minutes you are free
+  Today 6:30 PM   Tomorrow 9:00 AM   Tomorrow 11:30 AM
+  Pick another time · Cancel
+```
+
+One tap reschedules and starts a fresh reminder chain from the new time. "Free" means the same thing in three places — the triage panel, tomorrow's plan, and this card — because it all comes from `services/freeSlots.ts`.
+
+<Note>
+  Snoozes stay on everything that is not yet overdue, where "push it an hour" is a perfectly good answer. Snooze options only disappear once the reminders have already run their course.
+</Note>

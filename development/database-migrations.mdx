@@ -1,0 +1,118 @@
+---
+title: "Database Migrations — Forward-Only SQL with Drizzle"
+sidebarTitle: "Migrations"
+description: "Cue uses forward-only SQL migrations in apps/api/migrations/, run once per file in a transaction and recorded in _migrations — drizzle-kit push is not used."
+---
+
+Cue uses plain, hand-written SQL migration files instead of schema-push tooling. Each file is numbered, runs once inside its own transaction, and is recorded in a `_migrations` table so it is never applied twice. `apps/api/src/db/schema.ts` stays as the TypeScript source of truth for types and queries; migration files are how every schema change actually reaches the database.
+
+## Why Not `drizzle-kit push`?
+
+`drizzle-kit push` **does not work against PostgreSQL 18**. It mis-diffs the schema and emits `ALTER COLUMN id DROP NOT NULL` on primary key columns, which PostgreSQL rejects with error `42P16`. Plain forward-only SQL migrations side-step this entirely and have the additional benefit of being explicit, auditable, and safe to replay.
+
+<Warning>
+  Do not run `npm run db:push` on any environment. Use `npm run db:migrate` instead. The `db:push` script is present in `apps/api/package.json` for completeness but is known-broken for PostgreSQL 18.
+</Warning>
+
+## How Migrations Work
+
+- Migration files live in `apps/api/migrations/` as numbered `.sql` files: `0000_base_schema.sql`, `0001_…`, up through `0058_…` (59 files as of migration `0058`).
+- `npm run db:migrate` applies files **in name order**, each in its own transaction.
+- Applied files are recorded in `_migrations`. A file that has already run is skipped on every subsequent `db:migrate` call — re-running is safe.
+- The migrate script **refuses** to run against a database with no migration history unless `CUE_NEW_DATABASE=1` is set, preventing an accidentally empty database from being treated as a new one.
+
+## Adding a Migration
+
+<Steps>
+  <Step title="Write the SQL file">
+    Add a numbered `.sql` file to `apps/api/migrations/`. Use the next sequential number after the current highest (currently `0058`):
+
+    ```
+    apps/api/migrations/0059_my_change.sql
+    ```
+
+    Write every statement to be safe to re-run using `IF NOT EXISTS` / `IF EXISTS`:
+
+    ```sql
+    alter table commitments
+      add column if not exists sphere text;
+
+    create index if not exists commitments_sphere_idx
+      on commitments (org_id, sphere);
+    ```
+  </Step>
+
+  <Step title="Apply the migration">
+    ```bash
+    npm run db:migrate
+    ```
+
+    The file runs once, inside a transaction, and is recorded in `_migrations`.
+  </Step>
+
+  <Step title="Update schema.ts">
+    Update `apps/api/src/db/schema.ts` to match the new database shape. This file drives TypeScript types and Drizzle query builders — it must stay in sync with what the migrations have produced.
+  </Step>
+</Steps>
+
+## The `CUE_NEW_DATABASE` Guard
+
+<CardGroup cols={2}>
+  <Card title="First deploy on a new server" icon="server">
+    A brand-new database has no `_migrations` table. Set the flag once:
+
+    ```bash
+    CUE_NEW_DATABASE=1 npm run db:migrate
+    ```
+
+    This bootstraps the migration history from scratch.
+  </Card>
+  <Card title="Every subsequent run" icon="rotate">
+    Never set `CUE_NEW_DATABASE=1` again. All later deploys and local `db:migrate` calls run without it:
+
+    ```bash
+    npm run db:migrate
+    ```
+  </Card>
+</CardGroup>
+
+<Warning>
+  A database whose tables were all deleted looks identical to a new database from the migration runner's perspective. The `CUE_NEW_DATABASE` guard exists to prevent a production database that lost its tables from being silently rebuilt empty. If `_migrations` is absent and the flag is not set, the migrate step **fails the deploy** instead of destroying data.
+</Warning>
+
+## The Base Schema: `0000_base_schema.sql`
+
+`0000_base_schema.sql` is the story of a bug that was found by the test suite and fixed. The original tables (`orgs`, `users`, `commitments`, and five others) were created by `drizzle-kit push` before that tool was replaced. Every migration from `0001` onwards assumed those tables already existed — which was true on the machine where they were written, and false on any new one.
+
+The consequence: `npm run db:migrate` on an empty database failed at `0001` with `relation "commitments" does not exist`. The deploy steps in the README could not have worked on a new server.
+
+`0000_base_schema.sql` fixes this by providing the full base schema. Every statement uses `IF NOT EXISTS`, making it a no-op on a database that already has those tables. A fresh database now builds all 14 original tables and accepts inserts before `0001` runs.
+
+## Key Schema Decisions
+
+These decisions are baked into the schema from early migrations and are worth knowing before adding new tables:
+
+<CardGroup cols={2}>
+  <Card title="orgId on every tenant-owned table" icon="building">
+    Every table that belongs to a tenant carries `org_id` from day one. This is the column that is painful to retrofit — adding it later would require a migration touching every row. Query-layer isolation (`scope(req)`) filters every query by `org_id` from the JWT.
+  </Card>
+  <Card title="status column, not deleted_at" icon="toggle-on">
+    Rows are soft-deleted via a `status` column (`pending` / `done` / `cancelled` / `deleted`). Almost every query already filters `status = 'pending'`, so cancelled and deleted items are automatically excluded. A separate `deleted_at` column would have left every existing query silently including deleted rows.
+  </Card>
+  <Card title="clientId on visits for idempotency" icon="fingerprint">
+    Every visit carries a `clientId` generated once on the device. The server keys on it and returns the existing row rather than creating a duplicate if the same visit is submitted twice. A flaky connection can silently produce duplicates without this.
+  </Card>
+  <Card title="bytea for avatars and voice notes" icon="file-audio">
+    Avatars and voice note audio are stored as `bytea` in PostgreSQL rather than on the filesystem. This means they survive a deploy that replaces the application directory and require no separate file storage service for self-hosted installations.
+  </Card>
+</CardGroup>
+
+## Browsing the Schema
+
+Use Drizzle Studio to explore the live database interactively:
+
+```bash
+npm run db:studio
+```
+
+This opens a visual browser at `https://local.drizzle.studio` connected to the database in your `.env`.

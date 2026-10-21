@@ -1,0 +1,216 @@
+---
+title: "Calendar Feeds API — Connect and Sync External Calendars"
+sidebarTitle: "Calendar Feeds"
+description: "Add Google, Microsoft, iCal URL, or .ics file calendar sources. Feeds sync every 30 minutes and deduplicate by event UID — Cue never writes back."
+---
+
+Calendar feeds let you mirror events from external calendars into Cue. Cue is strictly read-only: it never writes back to the source calendar. Feeds sync automatically every 30 minutes and deduplicate by event UID, so re-syncing a feed is safe to do at any time. Events mirrored from a feed appear in all agenda and calendar views and can generate reminders (unless you disable them for that feed).
+
+<Warning>
+  The server must have `ENCRYPTION_KEY` configured before a calendar URL can be stored. URLs are encrypted at rest because an iCal address is a bearer credential — anyone holding it can read the calendar.
+</Warning>
+
+## Feed sources
+
+| Source | Auto-synced | Notes |
+|---|---|---|
+| `url` (iCal) | Yes, every 30 min | Any public or secret iCal URL |
+| `file` (.ics) | No — re-upload only | Re-uploading updates in place; deduplication is by event UID |
+| Google Calendar | Yes, via OAuth | Start with `GET /api/oauth/google/start` |
+| Microsoft 365 | Yes, via OAuth | Start with `GET /api/oauth/microsoft/start` |
+
+## Endpoints
+
+### `GET /api/calendar-feeds`
+
+Returns all connected calendar sources for the authenticated user.
+
+**Response**
+
+<ResponseField name="feeds" type="object[]">
+  Array of feed objects.
+
+  <Expandable title="feed fields">
+    <ResponseField name="id" type="string">UUID.</ResponseField>
+    <ResponseField name="label" type="string">Display name, e.g. `"Work Calendar"`.</ResponseField>
+    <ResponseField name="source" type="string">`url` or `file`.</ResponseField>
+    <ResponseField name="fileName" type="string | null">Original filename for file-sourced feeds.</ResponseField>
+    <ResponseField name="urlHint" type="string | null">Enough of the URL to recognise it (never the full address).</ResponseField>
+    <ResponseField name="remind" type="boolean">Whether Cue generates reminders for events from this feed.</ResponseField>
+    <ResponseField name="historyDays" type="number | null">How far back events are mirrored. `null` means everything the feed holds.</ResponseField>
+    <ResponseField name="status" type="string">`active` or `paused`.</ResponseField>
+    <ResponseField name="calendarName" type="string | null">Calendar name as read from the feed itself.</ResponseField>
+    <ResponseField name="lastSyncedAt" type="string | null">ISO 8601 — when the feed was last read.</ResponseField>
+    <ResponseField name="lastError" type="string | null">Error message from the last failed sync, if any.</ResponseField>
+    <ResponseField name="lastEventCount" type="number | null">Events imported, updated, or kept on the last sync.</ResponseField>
+    <ResponseField name="lastSkippedCount" type="number | null">Events skipped (past the history window, invalid, etc.).</ResponseField>
+    <ResponseField name="createdAt" type="string">ISO 8601.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="encryptionReady" type="boolean">
+  Whether `ENCRYPTION_KEY` is configured. If `false`, adding a URL-based feed will fail.
+</ResponseField>
+
+---
+
+### `POST /api/calendar-feeds`
+
+Subscribes to a calendar via iCal URL. The first sync runs inline so that a wrong URL is reported immediately rather than silently an hour later. If the sync fails, the feed is removed and the error is returned.
+
+**Request body**
+
+<ParamField body="url" type="string" required>
+  The iCal URL (must start with `https://`). 10–2000 characters. Stored encrypted; never returned in responses.
+</ParamField>
+
+<ParamField body="label" type="string" default="Google Calendar">
+  Display name for this feed. 1–100 characters.
+</ParamField>
+
+<ParamField body="remind" type="boolean" default="true">
+  Whether Cue should generate push reminders for events from this feed.
+</ParamField>
+
+<ParamField body="historyDays" type="number | null">
+  How many days back to mirror. `null` means no lower bound (everything the feed holds). Default: 365.
+</ParamField>
+
+**Response** — `201`:
+
+```json
+{
+  "feed": { "id": "...", "label": "Work Calendar", "source": "url", ... },
+  "report": { "imported": 42, "updated": 3, "repeating": 12, "skipped": 1, "calendarName": "Work" }
+}
+```
+
+**Error codes:**
+
+`400 encryption_key_required` — `ENCRYPTION_KEY` is not set.
+
+`400 sync_failed` — the URL was unreachable or did not return valid iCalendar data.
+
+<CodeGroup>
+```bash add-ical-feed
+curl -X POST http://localhost:3002/api/calendar-feeds \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://calendar.google.com/calendar/ical/example%40gmail.com/private-abc123/basic.ics",
+    "label": "Personal Google Calendar",
+    "remind": true,
+    "historyDays": 365
+  }'
+```
+</CodeGroup>
+
+---
+
+### `POST /api/calendar-feeds/upload`
+
+Imports events from a `.ics` file. This path always works — even when an admin has disabled external sharing (which removes iCal URLs) or the calendar has no URL. Re-uploading a newer export updates events in place; deduplication is by event UID, not by how the file arrived.
+
+**Request format:** raw `text/calendar` or `text/plain` body (the `.ics` file contents). Maximum 8 MB.
+
+**Query parameters**
+
+<ParamField query="label" type="string" default="My calendar">
+  Display name for this feed.
+</ParamField>
+
+<ParamField query="fileName" type="string">
+  Original filename, stored for display.
+</ParamField>
+
+<ParamField query="remind" type="boolean" default="true">
+  Whether to generate reminders for events from this file.
+</ParamField>
+
+<ParamField query="historyDays" type="number | 'all'">
+  How far back to import. `'all'` means no lower bound. Default: 365.
+</ParamField>
+
+<ParamField query="feedId" type="string">
+  UUID of an existing feed to update in place. Pass this when re-uploading a newer export — keeps history and the same ID.
+</ParamField>
+
+**Response** — `201` for a new feed, `200` when updating an existing one.
+
+<CodeGroup>
+```bash upload-ics
+curl -X POST "http://localhost:3002/api/calendar-feeds/upload?label=Work+Calendar&fileName=work.ics" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: text/calendar" \
+  --data-binary @work.ics
+```
+</CodeGroup>
+
+---
+
+### `POST /api/calendar-feeds/:id/sync`
+
+Triggers an on-demand sync for a URL-based feed ("Read now"). Useful after importing a new .ics to verify the connection, or to pull in an event immediately without waiting for the automatic timer.
+
+<Note>
+  File-sourced feeds cannot be auto-synced. To update them, re-upload a fresh export via `POST /api/calendar-feeds/upload?feedId=:id`.
+</Note>
+
+**Response**
+
+```json
+{
+  "feed": { "id": "...", "lastSyncedAt": "2026-10-15T10:30:00.000Z", ... },
+  "report": { "imported": 1, "updated": 0, "repeating": 5, "skipped": 0 }
+}
+```
+
+**Error codes:** `400 sync_failed`, `404 not_found`.
+
+---
+
+### `PATCH /api/calendar-feeds/:id`
+
+Updates a feed's display settings. Renaming a feed or toggling reminders. The `remind` toggle applies retroactively — it covers events the calendar already brought in, not only those that arrive from now on.
+
+**Request body**
+
+<ParamField body="label" type="string">New display name. 1–100 characters.</ParamField>
+<ParamField body="remind" type="boolean">Toggle reminder generation.</ParamField>
+<ParamField body="historyDays" type="number | null">Adjust the history window. `null` = no limit.</ParamField>
+
+**Response** — `{ feed: FeedDTO, reminders: { applied: number } | null }`
+
+---
+
+### `DELETE /api/calendar-feeds/:id`
+
+Disconnects the calendar and removes all mirrored events. Mirrored events only ever existed as a copy — leaving orphans behind would be worse than removing them.
+
+**Response**
+
+```json
+{ "ok": true }
+```
+
+---
+
+## OAuth flows
+
+For Google and Microsoft calendars, start an OAuth round trip to obtain tokens before adding feeds.
+
+### `GET /api/oauth/:provider/start`
+
+Begins the OAuth flow. The browser should navigate to this URL (not fetch it as JSON).
+
+**Path parameter**
+
+<ParamField path="provider" type="string" required>
+  One of `google`, `microsoft`.
+</ParamField>
+
+The server creates a short-lived `oauthStates` record, then redirects the browser to the provider's consent screen. On completion the provider redirects back to the callback URL, tokens are stored encrypted, and the calendar list for the account is returned for the user to choose from.
+
+<Tip>
+  After OAuth completes, use `POST /api/calendar-feeds` with the chosen calendar's iCal URL, or the provider-specific feed creation flow (returned from the OAuth callback as available calendars).
+</Tip>

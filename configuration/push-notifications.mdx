@@ -1,0 +1,153 @@
+---
+title: "Configure Web Push Notifications for Cue"
+sidebarTitle: "Push Notifications"
+description: "Generate VAPID keys, configure the reminder worker poll interval, and understand how Cue's escalating push chain works across Android, iOS, and desktop browsers."
+---
+
+Cue's reminder engine is the core of the product — a planner that does not chase you is just a list. Web push notifications are what let reminders arrive when the tab is closed and the browser is minimised. This page explains how to generate VAPID keys, what each configuration variable does, how the escalation chain works, and which platforms require extra steps.
+
+## What VAPID keys are
+
+VAPID (Voluntary Application Server Identification) is the standard that lets your server send push notifications directly to browsers without routing through a paid intermediary service. Cue generates its own VAPID key pair: they are self-signed, free, and require no account or registration with any external service.
+
+The key pair identifies your server to the browser's push service (Google's FCM for Chrome, Mozilla's autopush for Firefox, Apple's APNs for Safari). When a user subscribes to push notifications, their browser stores your public key alongside the subscription endpoint. Your server then signs every push request with the private key so the push service can verify it came from you.
+
+<Note>
+  The public key (`VAPID_PUBLIC_KEY`) is not a secret — the browser needs it to create a push subscription. Only the private key must be kept confidential.
+</Note>
+
+## Generating your VAPID keys
+
+Run this command once from the repository root:
+
+```bash
+npm run vapid
+```
+
+It prints two values:
+
+```
+VAPID_PUBLIC_KEY=BExamplePublicKeyBase64UrlEncoded...
+VAPID_PRIVATE_KEY=ExamplePrivateKeyBase64UrlEncoded...
+```
+
+Copy both into your `.env` file. Also set a contact address so push services can reach you if your server misbehaves:
+
+```dotenv
+VAPID_PUBLIC_KEY=BExamplePublicKeyBase64UrlEncoded...
+VAPID_PRIVATE_KEY=ExamplePrivateKeyBase64UrlEncoded...
+VAPID_SUBJECT=mailto:you@your-domain.com
+```
+
+<Warning>
+  **Generate once and keep the same pair.** Changing either key invalidates every existing push subscription in your database. All users will stop receiving notifications silently until they re-enable push in the app. If you must rotate keys, communicate this to your users in advance and plan for them to re-subscribe.
+</Warning>
+
+## Verifying push is configured
+
+The `/health` endpoint reports whether push is configured without touching the database:
+
+```bash
+curl localhost:3002/health
+```
+
+```json
+{"ok":true,"push":true}
+```
+
+If `push` is `false`, the VAPID keys are missing or empty in `.env`. Restart the server after adding them.
+
+## Platform support
+
+Different browsers and operating systems require different steps before push notifications work.
+
+| Platform | What you need to do |
+|---|---|
+| Android (Chrome, Edge) | Works as-is once the user taps **Enable** in the app |
+| Desktop Chrome | Works as-is |
+| Desktop Edge | Works as-is |
+| Desktop Firefox | Works as-is |
+| Desktop Safari | Works as-is (Safari 16+) |
+| iPhone / iPad | **Must add the app to the home screen first** — see below |
+
+<Warning>
+  **iPhone and iPad require a home screen install.** iOS exposes no push API to a regular browser tab — Safari only allows web push for installed PWAs. Users must tap **Share → Add to Home Screen** (iOS 16.4+) before enabling notifications. The app shows an **Install** prompt above the notifications banner on Today for exactly this reason.
+</Warning>
+
+### Installing on iPhone
+
+<Steps>
+  <Step title="Open Cue in Safari">
+    The app must be opened in Safari specifically — other iOS browsers cannot install PWAs.
+  </Step>
+  <Step title="Tap the Share button">
+    The share icon is the box with an upward arrow at the bottom of the screen.
+  </Step>
+  <Step title="Choose Add to Home Screen">
+    Scroll down in the share sheet and tap **Add to Home Screen**, then tap **Add**.
+  </Step>
+  <Step title="Open from the home screen and enable notifications">
+    Open Cue from the new home screen icon. The **Enable** banner will now work and the browser will prompt for permission.
+  </Step>
+</Steps>
+
+## How the escalating push chain works
+
+When a commitment becomes due, Cue queues a reminder row and the worker fires the first notification. If nothing happens — no action, no snooze, no reschedule — the worker queues the next attempt and keeps going until the escalation limit is reached.
+
+```
+Due time    →  First push (attempt 0)
++15 min     →  "Still open — 15 min overdue"
++30 min     →  "Still open — 30 min overdue"
++45 min     →  "Still open — 45 min overdue"
++60 min     →  "Still open — 60 min overdue"  ← MAX_ESCALATIONS=4 reached, chain stops
+```
+
+The commitment does not disappear when the chain ends. It moves to the **You dropped these** list and stays there permanently until you mark it done, cancel it, or let it go through triage. The chain stopping only means the buzzing stops — the record of what was dropped is never silently forgotten.
+
+**Marking done, cancelling, or snoozing** kills the queued chain immediately. Snoozing starts a fresh chain from the new time, with the escalation count reset to zero — you are not considered late for a time you just moved.
+
+### Notification content
+
+All notifications are sent at **high urgency** with a TTL of 6 hours. High urgency is the same priority native delivery apps use, which is what ensures they arrive on time rather than being held by Android's battery-saving sleep. The 6-hour TTL means a notification that could not be delivered within that window is dropped rather than arriving the next morning to remind you about yesterday's call.
+
+Notifications carry action buttons — **Mark done**, **Snooze 15m**, and **Call** (when the commitment has a phone number). The service worker handles these; tapping opens the app at a deep link so the action is performed with a full authenticated session.
+
+### The SKIP LOCKED pattern
+
+The reminder worker claims due rows with `FOR UPDATE SKIP LOCKED`. This means it is safe to run multiple API instances behind a load balancer — two workers running simultaneously will never double-send the same notification because each row is locked by whichever worker claimed it first, and the other skips it.
+
+## Configuration reference
+
+<ParamField path="REMINDER_POLL_MS" type="number" default="20000">
+  How often the worker checks for due reminders, in milliseconds. The default is every 20 seconds. A reminder may fire up to this many milliseconds after its scheduled time.
+</ParamField>
+
+<ParamField path="ESCALATION_MINUTES" type="number" default="15">
+  The gap in minutes between escalation notifications. After the first push fires and no action is taken, each subsequent re-notification arrives this many minutes later.
+</ParamField>
+
+<ParamField path="MAX_ESCALATIONS" type="number" default="4">
+  The maximum number of times a commitment is re-notified before the chain stops. The commitment remains in the overdue list indefinitely; only the push notifications stop.
+</ParamField>
+
+## Testing notifications end-to-end
+
+<Steps>
+  <Step title="Start the server with VAPID keys set">
+    Confirm `/health` returns `{"ok":true,"push":true}`.
+  </Step>
+  <Step title="Open the app and tap Enable">
+    The **Enable** banner appears on the Today screen. Accept the browser permission prompt.
+  </Step>
+  <Step title="Tap Send test">
+    A test notification should arrive within a few seconds, even with the tab in the background.
+  </Step>
+  <Step title="Book something 2–3 minutes out and close the tab">
+    If the notification arrives with the tab closed and the browser minimised, the full delivery path is working and real reminders will arrive on time.
+  </Step>
+</Steps>
+
+<Tip>
+  On a self-hosted VPS, the most common reason for missed notifications is the process sleeping. Any hosting plan that hibernates the process when nobody is browsing will also stop the reminder worker. Choose a plan that keeps one Node process running continuously — if you are unsure, book something five minutes out, close the tab, and wait.
+</Tip>

@@ -1,47 +1,229 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Cue in Five Minutes"
+sidebarTitle: "Quickstart"
+description: "Install Cue locally with Node 22 and PostgreSQL, seed demo data, and open the PWA — no API keys required to run the core planner."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+Cue runs against your locally installed PostgreSQL — no Docker, no cloud account, no API keys for the core features. Follow the steps below and you will have the API, the PWA, and a seeded demo account running in about five minutes.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  All commands are run from the **repo root**. The monorepo uses npm workspaces, so a single `npm install` at the root installs dependencies for the API, the web app, and the shared package together.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Check Prerequisites">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+You need two things installed on your machine before you begin:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+| Requirement | Version | Notes |
+|---|---|---|
+| **Node.js** | ≥ 22 | The `engines` field in `package.json` enforces this. Node's Linux binaries require glibc 2.34+; use Ubuntu 22.04+, Debian 12+, or Amazon Linux 2023. |
+| **PostgreSQL** | 14+ (tested on 18) | Must be running on port 5432. No Docker is needed — Cue talks to your system PostgreSQL directly. |
+
+No third-party API key is required. Push notifications, conflict detection, recurring plans, and offline support all work out of the box.
+
+</Step>
+
+<Step title="Install Dependencies">
+
+Clone the repository and install all workspace packages in one command:
+
+```bash
+npm install
+```
+
+This installs Fastify, Drizzle, Vite, React, and everything else in the monorepo. The `devDependencies` (including Vite) are needed even in production builds, so always use `npm install` or `npm ci --include=dev`.
+
+</Step>
+
+<Step title="Create the Database">
+
+Run the setup script to create the `cue` PostgreSQL role and database. You will be prompted for your PostgreSQL superuser password (the one you set when installing PostgreSQL). Nothing is written to disk.
+
+```bash
+npm run db:setup
+```
+
+<Note>
+  On non-Windows systems, the `db:setup` script runs a PowerShell helper (`scripts/setup-db.ps1`). If you are on Linux or macOS, you can create the role and database by hand instead:
+
+  ```bash
+  sudo -u postgres psql \
+    -c "create role cue login password 'your-password'" \
+    -c "create database cue owner cue"
+  ```
+
+  Then set `DATABASE_URL=postgres://cue:your-password@localhost:5432/cue` in your `.env` file before proceeding.
+</Note>
+
+Next, copy `.env.example` to `.env` at the repo root. The example file already contains generated VAPID keys; the minimum you must set is `DATABASE_URL` and `JWT_SECRET`:
+
+```bash
+# .env (minimum for local development)
+DATABASE_URL=postgres://cue:your-password@localhost:5432/cue
+JWT_SECRET=replace-with-64-random-hex-characters
+```
+
+Generate a `JWT_SECRET` with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+</Step>
+
+<Step title="Apply Migrations">
+
+Run all SQL migrations from `apps/api/migrations/` against the new database. On a brand-new, empty database you must lift the new-database guard once:
+
+```bash
+CUE_NEW_DATABASE=1 npm run db:migrate
+```
+
+This creates all 14 tables (`orgs`, `users`, `commitments`, `reminders`, `places`, `contacts`, `interactions`, and more) and records each migration in `_migrations`. Every subsequent `npm run db:migrate` — including the one each deploy runs — omits the `CUE_NEW_DATABASE=1` flag.
+
+<Warning>
+  Do **not** use `npm run db:push`. `drizzle-kit push` mis-diffs against PostgreSQL 18 and emits `ALTER COLUMN id DROP NOT NULL` on primary keys, which PostgreSQL rejects. Always use the forward-only SQL migration files.
+</Warning>
+
+</Step>
+
+<Step title="Seed Demo Data">
+
+Create a local demo tenant with a sample week of data:
+
+```bash
+npm run seed
+```
+
+This creates the user `demo@cue.local` with password `demo1234`, and queues a reminder that fires about one minute after seeding — so you can test the full push notification path immediately.
+
+</Step>
+
+<Step title="Start the Development Servers">
+
+Start the API and the Vite development server together with one command:
+
+```bash
+npm run dev
+```
+
+This uses `concurrently` to run both processes side by side:
+
+| Server | Default URL | Configured by |
+|---|---|---|
+| **API** (Fastify + workers) | `http://localhost:3002` | `PORT` in `.env` |
+| **Web** (Vite PWA) | `http://localhost:5173` | `WEB_PORT` in `.env` |
+
+Both ports are configurable. The API serves `/health` immediately; open `http://localhost:3002/health` to confirm the database connection and push configuration:
+
+```json
+{ "ok": true, "push": true }
+```
+
+If `push` is `false`, the VAPID keys in `.env` were not picked up. Run `npm run vapid` to generate a fresh key pair and paste the output into `.env`.
+
+</Step>
+
+<Step title="Log In and Test Push Reminders">
+
+Open `http://localhost:5173` in your browser and log in with the seeded credentials:
+
+<CodeGroup>
+
+```text Credentials
+Email:    demo@cue.local
+Password: demo1234
+```
+
+```bash Generate VAPID Keys (if needed)
+npm run vapid
+# Prints VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY.
+# Paste both into .env, then restart with npm run dev.
+```
+
+```bash Check API Health
+curl -s http://localhost:3002/health
+# { "ok": true, "push": true }
+```
+
+</CodeGroup>
+
+Once logged in, the **Today** screen shows a notification banner. Click **Enable** to subscribe your browser to push, accept the browser permission prompt, then click **Send test**. If the test notification arrives with the tab minimised, the entire delivery path — VAPID keys, service worker, Fastify push route — is working correctly, and real reminders will arrive in the background.
+
+- **Android / desktop Chrome, Edge, Firefox** — enable and test works immediately.
+- **iPhone / Safari** — you must install the app to your home screen first (see the next step).
+
+</Step>
+
+<Step title="Install as a PWA">
+
+Cue is a full Progressive Web App. Installing it to the home screen gives you an app icon, standalone window, and — critically on iOS — the ability to receive push notifications at all.
+
+<Warning>
+  **iOS requires installation before push notifications work.** Safari on iPhone exposes no push API to a normal browser tab. Until the app is on the home screen, the entire reminder engine is silently disabled for iOS users. The app shows an **Install** prompt on the Today screen above the notifications banner specifically because installing is what makes notifications possible.
+</Warning>
+
+| Browser | How to install |
+|---|---|
+| **Chrome, Edge, Android** | Tap the **Install** button on the Today screen — one tap installs via `beforeinstallprompt`. |
+| **Safari on iPhone (iOS 16.4+)** | Tap the Share icon → **Add to Home Screen**. The app guides you through these two taps. |
+
+Once installed, the app opens in standalone mode (no browser chrome) and push subscriptions are registered automatically on every launch.
+
+</Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## All Commands at a Glance
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CodeGroup>
+
+```bash Setup
+# 1. Install all workspace packages
+npm install
+
+# 2. Create the cue role and database (prompts for PG superuser password)
+npm run db:setup
+
+# 3. Apply migrations (CUE_NEW_DATABASE=1 only on a fresh database)
+CUE_NEW_DATABASE=1 npm run db:migrate
+
+# 4. Seed demo account (demo@cue.local / demo1234)
+npm run seed
+
+# 5. Start API (:3002) + Vite (:5173) together
+npm run dev
+```
+
+```bash Utilities
+# Generate new VAPID push keys
+npm run vapid
+
+# Run the full test suite (unit + web + API)
+npm test
+
+# Type-check the entire monorepo
+npm run typecheck
+
+# Open Drizzle Studio (database browser)
+npm run db:studio
+
+# Apply pending migrations (subsequent runs, no flag needed)
+npm run db:migrate
+```
+
+```bash Production Build
+# Build the React PWA into apps/web/dist
+npm run build
+
+# Start the API (which also serves the built web app on one port)
+npm start -w @cue/api
+```
+
+</CodeGroup>
+
+<Note>
+  **`VITE_API_URL` must be blank in production.** When the API serves the built web app from the same origin, the browser calls a relative `/api` path. Setting `VITE_API_URL=http://localhost:3002` in a production `.env` makes every API call from the deployed site point back at a machine that does not exist. Leave the variable empty (or omit it entirely) in all non-development environments.
+</Note>

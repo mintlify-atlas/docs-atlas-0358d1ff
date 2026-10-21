@@ -1,0 +1,167 @@
+---
+title: "Contacts, Keep-in-Touch, and the People Screen"
+sidebarTitle: "People & Contacts"
+description: "Cue turns names mentioned in captures into real contact records with roles, phone numbers, and a place — enabling Call buttons, visit history, and keep-in-touch cadences."
+---
+
+Anyone you name while logging a visit becomes a real contact record in the same transaction. A phone number captured in a car park is the most perishable thing in the whole flow — it never sits as free text waiting to be re-entered somewhere else.
+
+## Contact fields
+
+| Field | Notes |
+|-------|-------|
+| `name` | Free text; occupations stored as `The dentist` until named |
+| `role` | Occupation or relationship (`dentist`, `plumber`, `ca`) |
+| `phone` | Used for the Call button in reminders and on Today |
+| `email` | Optional |
+| `notes` | Free text; `place: Sirsi` extracted and remembered |
+| `place` | Which saved Place record this person belongs to |
+
+## Contacts created inline
+
+Contacts are created in the same database transaction as the visit that named them. The capture parser calls `rememberPerson` which:
+
+1. Searches the contacts table by both `name` and `role` (case-insensitive)
+2. If found, fills in the `place` if it was not already known — never overwrites
+3. If not found, creates the contact — putting occupations in the `role` column where they are findable
+
+```typescript
+// "appointment with the dentist in Sirsi"
+// → name: "The dentist", role: "dentist", notes: "place: Sirsi"
+```
+
+Say `"the dentist who lives in Sirsi"` once, and the next `"appointment with the dentist"` already knows:
+
+> *Where: Sirsi — You said dentist is in Sirsi before.*
+
+A place named explicitly always wins over a remembered one, because it is what you just said. A remembered place fills a gap; it never overwrites.
+
+## The Call button
+
+A commitment inherits the contact from its visit. That contact's phone number is what makes **Call** appear:
+
+- On the Today card
+- On the person's profile page
+- As an action button on the reminder notification
+
+The service worker cannot dial directly, so the Call action deep-links into the app, which then opens `tel:<number>`. The `tel:` URI is opened by the OS and handed to the phone dialler.
+
+## Contact matching — name and role
+
+`findPeople` looks for contacts matching a word across both the `name` and `role` columns:
+
+```sql
+WHERE org_id = $1
+  AND (name ILIKE '%plumber%' OR role ILIKE '%plumber%')
+```
+
+This is what makes `"call the plumber tomorrow"` work: `"plumber"` is a role, not a name, and without matching both columns it would never be found.
+
+### Two plumbers → disambiguation prompt
+
+When more than one contact matches, Cue does not coin-toss:
+
+> *Which one? 2 people match "plumber"*  
+> Ramesh Plumbing · 98765 43210 · Koregaon Park  
+> Sharma Plumbers · 91234 56789 · Hadapsar
+
+One tap rewrites the sentence to name them specifically, and the next read resolves to exactly one. Guessing would put the plan against a stranger and offer their phone number.
+
+## `GET /api/contacts` and `POST /api/contacts`
+
+<CodeGroup>
+```http title="List contacts"
+GET /api/contacts
+Authorization: Bearer <token>
+```
+
+```json title="Response"
+{
+  "contacts": [
+    {
+      "id": "uuid-...",
+      "name": "The dentist",
+      "role": "dentist",
+      "phone": "+91 98765 43210",
+      "email": null,
+      "notes": "place: Sirsi",
+      "placeLabel": "Sirsi"
+    }
+  ]
+}
+```
+
+```http title="Create contact"
+POST /api/contacts
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "name": "Dr. Mehta",
+  "role": "dentist",
+  "phone": "+91 98765 43210",
+  "notes": "place: Apollo Dental, Pune"
+}
+```
+
+```json title="Response (201 Created)"
+{
+  "id": "uuid-...",
+  "name": "Dr. Mehta",
+  "role": "dentist",
+  "phone": "+91 98765 43210",
+  "email": null,
+  "notes": "place: Apollo Dental, Pune",
+  "placeLabel": "Apollo Dental, Pune"
+}
+```
+</CodeGroup>
+
+## Phone import — Android only
+
+**People → Import from my phone** opens Android's own contact chooser through the Contacts Picker API. It is a picker, not a sync:
+
+| Requirement | Why it matters |
+|-------------|---------------|
+| Chrome or Edge on **Android** | The Contacts Picker API does not exist on iOS, desktop, or Firefox |
+| Secure context (HTTPS or localhost) | Required by the browser for sensitive APIs |
+| Real user tap | Called from a timer it silently does nothing |
+
+Only `name`, `tel`, and `email` are requested. Asking for addresses and photos to store a phone number is asking for trust not yet earned.
+
+### Matching, not just inserting
+
+The valuable half is matching existing contacts, not creating new ones. Anyone named in a capture already became a contact with no phone number — which is why the Call button never appeared. Importing fills that gap:
+
+<Steps>
+  <Step title="Match by name">
+    Each imported contact is matched against existing contacts by name (case-insensitive).
+  </Step>
+  <Step title="Fill in the gaps">
+    If a match is found and the existing contact has no phone number, the imported number is added.
+  </Step>
+  <Step title="Never overwrite">
+    An existing phone number is never overwritten. The one already here was typed deliberately; the phone's copy may be an old landline nobody has removed.
+  </Step>
+  <Step title="Report back">
+    The result tells you what happened: *"1 added, 1 filled in, 1 already complete."*
+  </Step>
+</Steps>
+
+## Keep in touch
+
+Cadences can be set per contact — weekly, fortnightly, monthly, and so on. When the interval elapses without a logged interaction, a gentle reminder appears:
+
+> *You last spoke to Rajesh 3 weeks ago*
+
+Keep-in-touch reminders do not escalate like plan reminders — they are informational nudges, not chasing.
+
+## Occasions — birthdays and anniversaries
+
+Birthdays and anniversaries saved on a contact generate automatic yearly reminders. They are stored as recurrence rules (`freq: yearly`) so the reminder engine handles them the same way as any other repeating plan.
+
+Typing `Riya's birthday on 3 Nov` in the capture box is detected as a yearly occasion and saved as a recurrence, not a one-off.
+
+## Deleting a contact
+
+Deleting a contact keeps their visits and follow-ups. Removing someone from your address book should not erase the record that you met them. The commitment rows that referenced the contact keep their `contactId`, and the contact's name continues to appear in History.

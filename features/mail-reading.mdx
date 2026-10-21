@@ -1,0 +1,167 @@
+---
+title: "Mail Reading — Inbox to Plans Automatically"
+sidebarTitle: "Mail Reading"
+description: "Cue connects to Gmail and Outlook read-only, extracting tickets, hotel stays, parcels, bills, insurance reminders, and FASTag top-ups into your planner automatically."
+---
+
+Cue reads your inbox and turns what it finds into planner entries — train tickets become trips, utility bills become bill reminders, parcel dispatches become delivery trackers. This happens in the background without you opening the app. Nothing leaves your server, no AI is involved, and the inbox is never modified.
+
+<Note>
+  Mail reading is India-focused. IRCTC e-tickets, FASTag balance alerts, PUC (Pollution Under Control) certificate reminders, UPI payment confirmations, and traffic challans are all understood natively. Travel booking aggregators (MakeMyTrip, Goibibo, Cleartrip, ixigo), major Indian banks, insurers, and courier services are recognised by sender address.
+</Note>
+
+## What gets extracted
+
+<CardGroup cols={2}>
+  <Card title="Travel & Tickets" icon="train">
+    IRCTC e-tickets (including PDF e-tickets), flights (IndiGo, Air India, SpiceJet, Akasa, Vistara), bus bookings (redBus, Abhibus), hotel bookings (Booking.com, Agoda, OYO, Airbnb), and events (BookMyShow, PVR, INOX).
+  </Card>
+  <Card title="Parcels & Deliveries" icon="box">
+    Amazon, Flipkart, Myntra, Meesho, Ajio, Nykaa, JioMart, and courier services (Delhivery, BlueDart, Ekart, XpressBees). Tracks order reference, expected delivery date, and cash-on-delivery amounts.
+  </Card>
+  <Card title="Bills & Renewals" icon="file-invoice-rupee">
+    Credit card statements (HDFC, ICICI, SBI, Axis, Kotak, Amex, and others), electricity bills (BESCOM, MAHADISCOM, TANGEDCO, BSES, and others), broadband and mobile bills.
+  </Card>
+  <Card title="Insurance & Vehicles" icon="car">
+    Car, bike, health, and life insurance renewals and premium due dates. PUC certificate expiry, vehicle service reminders, FASTag low balance and recharge alerts, and traffic challans.
+  </Card>
+</CardGroup>
+
+## Connecting a mail account
+
+Mail reading uses the same OAuth connection as calendar reading — one Google or Microsoft account can provide both calendar and mail access.
+
+<Steps>
+  <Step title="Open Settings">
+    Go to **Settings → Email & Calendars**.
+  </Step>
+  <Step title="Connect your account">
+    Click **Connect Google** or **Connect Microsoft**. Choose the account and accept the consent screen. For mail reading, Cue requests `gmail.readonly` (Google) or `Mail.Read` (Microsoft) — read-only scopes only.
+  </Step>
+  <Step title="Enable mail reading">
+    Toggle **Read my email for plans** on the connected account. Cue begins its first pass immediately, looking back 14 days.
+  </Step>
+</Steps>
+
+<Warning>
+  **Read-only scopes, no inbox modifications.** Cue requests `gmail.readonly` on Google and `Mail.Read` on Microsoft. It never marks messages as read, deletes anything, or sends mail on your behalf. What arrives in your inbox is unchanged by anything Cue does.
+</Warning>
+
+## How the background worker runs
+
+A mail worker runs on a timer (every 15 minutes by default). For each account with mail reading enabled:
+
+1. Fetches message IDs matching known senders or relevant subjects — Gmail uses targeted search queries so only matching messages are ever opened
+2. Skips messages already seen at the current reader version
+3. For each new message: extracts its plain text (or converts HTML to readable text), reads attached PDFs up to 3 MB each
+4. Calls the structured extractors (not AI — see below) and creates commitments, bills, or deliveries from what is found
+5. Records each message ID as seen so it is never processed twice
+6. Pushes one notification per person summarising what was found
+
+The first pass looks back 14 days. After that, the worker looks from the last check date with one day's overlap (to handle messages that arrive while a run is in progress).
+
+## Structured extraction — no AI
+
+<Note>
+  Cue does not use AI for mail reading. Every extractor is a deterministic, structured parser — same input, same output, every time. This means it costs nothing to run, works without an API key, runs offline, and is debuggable: you can see exactly which words produced which field.
+</Note>
+
+The extractors live in `packages/shared` and cover:
+
+- **`parseBookings`** — IRCTC PNR, flight bookings, hotel confirmations, bus tickets
+- **`parseDueNotice`** — credit card statements, utility bills, payment due notices
+- **`parseInsurance`** — policy renewal dates, premium due dates, cover expiry
+- **`parseVehicleNotice`** — PUC certificate validity, service due reminders
+- **`parseFastag`** — FASTag low balance alerts and recharge confirmations
+- **`parseChallan`** — traffic challans issued or paid
+- **`parseDelivery`** — parcel dispatch, tracking, delivery confirmation
+- **`parseExamEmail`** — exam board notifications (admit cards, results, city intimation)
+
+HTML emails are converted to readable text before extraction — table layouts are flattened to `Label: value` rows, cells become comma-separated, and entities are decoded.
+
+## PDF extraction
+
+IRCTC e-tickets arrive as PDF attachments. Cue reads attached PDFs up to 3 MB (up to 2 PDFs per message) and runs the same extractors on the PDF text. A PDF often carries a complete itinerary — both legs of a return journey — where the email body has only a summary. When the PDF parse finds more bookings than the email body, the PDF result wins.
+
+RRB (Railway Recruitment Board) admit cards and result lists are also extracted from PDFs via specialised parsers, creating exam entries rather than bookings.
+
+## Exam notice watch
+
+<Accordion title="Admin-only feature — exam board public notice pages">
+
+Some exam boards (SSC, UPSC, IBPS, NTA, and state boards) publish important notices on their public websites rather than (or in addition to) sending email. Cue can watch those pages for new notices.
+
+**Configuration:**
+
+```bash
+# .env
+ADMIN_EMAILS=admin@yourdomain.com,other@yourdomain.com
+NOTICE_WATCH=on   # set to "off" to disable scraping entirely
+```
+
+`ADMIN_EMAILS` — who may review scraped notices before they are broadcast to users tracking that exam. Notices go into a review queue; an admin approves or discards each one.
+
+`NOTICE_WATCH=off` — disables the scraper entirely. No public pages are fetched.
+
+This is designed for operators who host Cue for a community of exam aspirants — not for individual self-hosted use.
+
+</Accordion>
+
+## Reader versioning
+
+Each message is stored with the version of the reader that processed it (`readerVersion`). When the extractors improve — a layout they missed, a field they got wrong — raising `READER_VERSION` causes every account to re-read its last 30 days on the next pass. Corrections replace what the older reader saved. Messages re-processed this way do not generate new notifications (they are not "news"), but the underlying data is corrected.
+
+## What the API exposes
+
+<CodeGroup>
+
+```bash List connected mail accounts
+GET /api/mail
+Authorization: Bearer <token>
+```
+
+```bash Trigger an immediate check (one person's accounts)
+POST /api/mail/check
+Authorization: Bearer <token>
+```
+
+</CodeGroup>
+
+The list endpoint returns each connected account, when mail was last checked, any error from the last run, and recent finds (newest first) — exactly what Cue extracted from which message, in plain words, so you can see what it did with your email.
+
+### Recent finds shape
+
+```json
+{
+  "accounts": [
+    {
+      "id": "uuid",
+      "email": "you@gmail.com",
+      "provider": "google",
+      "mailEnabled": true,
+      "mailCheckedAt": "2025-10-03T09:15:00.000Z",
+      "mailError": null
+    }
+  ],
+  "recentFinds": [
+    {
+      "found": "IRCTC 12345 Bengaluru → Mumbai, Fri 3 Oct, 06:15",
+      "at": "2025-10-03T09:15:22.000Z",
+      "email": "you@gmail.com"
+    },
+    {
+      "found": "HDFC Credit Card: ₹4,250 due Mon 6 Oct",
+      "at": "2025-10-03T09:15:18.000Z",
+      "email": "you@gmail.com"
+    }
+  ]
+}
+```
+
+Each `found` string is in the user's own language (English or Hindi) and names what was extracted. The booking's own name (train number, airline route, insurer name) is kept as the email gave it — only the surrounding words are translated.
+
+## Recognised senders
+
+The sender allow-list covers over 150 domains across travel, e-commerce, banking, insurance, utilities, vehicle, and exam categories. Messages from unlisted senders are still opened if their subject matches keywords like `PNR`, `booking confirmed`, `e-ticket`, `insurance`, `FASTag`, `challan`, `admit card`, or `out for delivery`. This catches travel agents, smaller regional banks, and any sender whose address is not yet in the list.
+
+Gmail searches are batched into chunks of 60 senders per query (Gmail's limit) plus one subject-keyword query. Outlook fetches the 50 most recent messages meeting a date filter, then checks sender and subject locally before opening any message body.

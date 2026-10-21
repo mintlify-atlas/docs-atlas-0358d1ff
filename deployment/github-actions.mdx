@@ -1,0 +1,184 @@
+---
+title: "Automated Deployment with GitHub Actions"
+sidebarTitle: "GitHub Actions"
+description: "Cue ships a GitHub Actions workflow that runs the full test suite on every push, then deploys main to your server via SSH after all checks pass."
+---
+
+Cue ships a ready-to-use workflow at `.github/workflows/deploy.yml`. It runs the full type-check and test suite on every push and pull request, deploys `main` to your server only after everything passes, and fails loudly if the deployed service does not become healthy. You get a permanent record of every deploy, automatic rollback detection, and a pipeline that will not ship a broken build.
+
+## What the workflow does
+
+The workflow has two jobs that run in order.
+
+### Job 1: Typecheck and tests
+
+Runs on every push and every pull request, against a real PostgreSQL service container on the runner itself (not your production database). The suite covers:
+
+- **Type-check**: `npm run typecheck` across all workspaces
+- **Unit tests**: pure-function parser tests in `packages/shared` — no database, very fast
+- **API tests**: service-layer tests in `apps/api` against real PostgreSQL — unique index collisions, check constraint violations, cascade behaviour. Everything a mock would have faked away
+
+<Note>
+  The test database runs on the runner over loopback. Pointing the test suite at production RDS was measured and rejected: 155 seconds against a database across the internet versus 12 seconds on loopback, with flaky failures that came and went between identical runs. It would also require opening port 5432 to `0.0.0.0/0` — the production database exposed to anyone, for slower and less reliable tests.
+</Note>
+
+### Job 2: Build and deploy
+
+Runs only on pushes to `main` (and on manual `workflow_dispatch`), only after job 1 passes. The deploy steps, in order:
+
+1. Build the web app on the runner (`npm ci --include=dev && npm run build`) — the server never installs Vite, TypeScript, or esbuild
+2. Package the release into a tarball (web app dist, API source, migrations, shared package)
+3. Stream the tarball to the server over SSH
+4. On the server: install runtime dependencies (`npm ci --omit=dev`), apply migrations, restart the systemd service
+5. **Poll `/health` for up to 20 seconds** — if the endpoint never responds, the job fails and prints the last 50 lines of `journalctl`
+
+<Warning>
+  **The health poll is what makes the green tick mean something.** Without it, a service that crash-loops on startup reports success. The first you would hear of a broken deploy is that reminders stopped arriving. If `/health` does not respond within 20 seconds, the job exits non-zero and you get an email before any users notice.
+</Warning>
+
+### Why hard reset, not merge
+
+The deploy does `git fetch` then `git reset --hard` to the pushed commit rather than `git pull`. This makes the server's working tree reproducible — the exact state of the commit, every time, with no local divergence possible. Untracked files (including `.env`) are left alone by `reset --hard`, and `.env` is in `.gitignore` so it can never be committed accidentally.
+
+### Concurrency group
+
+```yaml
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+```
+
+This serialises deploys on the same branch. Two overlapping runs would race on the reset, the install, and the migration — the loser would leave the server in a state neither commit describes. `cancel-in-progress: false` queues the second run rather than cancelling it, so no push is silently skipped.
+
+## Two SSH key pairs
+
+This is the part that most commonly trips people up. There are two key pairs, pointing in **opposite directions**. Mixing them up produces a "permission denied" that looks identical either way.
+
+| Direction | Private key location | Public key location |
+|-----------|---------------------|---------------------|
+| GitHub Actions → your server | GitHub secret `DEPLOY_SSH_KEY` | Server `~/.ssh/authorized_keys` |
+| Your server → GitHub (for `git fetch`) | Server `~/.ssh/id_ed25519` | Repository → Settings → **Deploy keys** (read-only) |
+
+<Note>
+  The second pair (server → GitHub) is only needed for **private repositories**. Without it, `git fetch` on the server fails with a repository-level permission error, not a server connection error — the error message mentions the repository, not the server, which is what makes it easy to mistake for the wrong problem.
+</Note>
+
+## GitHub repository settings
+
+In your repository: **Settings → Secrets and variables → Actions**
+
+### Secrets (encrypted, never shown again)
+
+| Name | Value |
+|------|-------|
+| `DEPLOY_SSH_KEY` | The **private** key, entire file including the `-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----` lines |
+
+### Variables (plain text, visible in logs)
+
+| Name | Example | Notes |
+|------|---------|-------|
+| `DEPLOY_HOST` | `cue.example.com` or `203.0.113.10` | Your server's hostname or IP |
+| `DEPLOY_USER` | `ubuntu` | SSH login user. Use `ec2-user` on Amazon Linux. |
+| `DEPLOY_PATH` | `/srv/cue` | Optional — this is the default if unset |
+
+<Tip>
+  Host and user are **variables, not secrets**, deliberately. They are not sensitive information, and a masked hostname in the workflow logs makes a failing deploy nearly impossible to debug. You will want to see `Connecting to cue.example.com`, not `Connecting to ***`.
+</Tip>
+
+## Server setup (once)
+
+<Steps>
+  <Step title="Generate a dedicated deploy key">
+    Generate a key for this purpose only — reusing your personal key means anyone with repository admin access can act as you on the server:
+
+    ```bash
+    ssh-keygen -t ed25519 -C "github-actions" -f ~/.ssh/cue_deploy -N ""
+    ```
+
+    This creates two files:
+    - `~/.ssh/cue_deploy` — the private key (goes into `DEPLOY_SSH_KEY`)
+    - `~/.ssh/cue_deploy.pub` — the public key (goes into `authorized_keys`)
+  </Step>
+
+  <Step title="Authorise GitHub Actions to connect">
+    ```bash
+    cat ~/.ssh/cue_deploy.pub >> ~/.ssh/authorized_keys
+    ```
+  </Step>
+
+  <Step title="Copy the private key into GitHub">
+    ```bash
+    cat ~/.ssh/cue_deploy
+    ```
+
+    Copy the entire output — from `-----BEGIN OPENSSH PRIVATE KEY-----` through `-----END OPENSSH PRIVATE KEY-----`, including both lines. Paste this as the value of the `DEPLOY_SSH_KEY` secret in GitHub.
+  </Step>
+
+  <Step title="Add the sudoers entry for the deploy user">
+    The deploy needs to restart the `cue` service and read its logs. Nothing else. Edit with `sudo visudo` to avoid locking yourself out of sudo with a syntax error:
+
+    ```bash
+    sudo visudo -f /etc/sudoers.d/cue
+    ```
+
+    For Ubuntu / Debian (paths are `/bin/`):
+
+    ```
+    ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart cue, /bin/journalctl -u cue *
+    ```
+
+    <Warning>
+      **Amazon Linux 2023 uses different paths.** `systemctl` and `journalctl` live under `/usr/bin`, not `/bin`. Sudoers matches the literal path, so list both to be safe, and use `ec2-user` as the login user:
+
+      ```
+      ec2-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cue, /bin/systemctl restart cue, /usr/bin/journalctl -u cue *, /bin/journalctl -u cue *
+      ```
+    </Warning>
+  </Step>
+
+  <Step title="(Private repos only) Add a server-to-GitHub deploy key">
+    If your repository is private, the server needs its own key to `git fetch` from GitHub. Generate a separate key on the server:
+
+    ```bash
+    ssh-keygen -t ed25519 -C "cue-server-deploy" -f ~/.ssh/id_ed25519 -N ""
+    ```
+
+    Then copy the public key:
+
+    ```bash
+    cat ~/.ssh/id_ed25519.pub
+    ```
+
+    In GitHub: **Repository → Settings → Deploy keys → Add deploy key**. Paste the public key, enable **read-only** access.
+  </Step>
+</Steps>
+
+## Triggering and monitoring deploys
+
+Once the secrets and variables are set and the server is configured:
+
+1. Push a commit to `main` — the workflow starts automatically
+2. Open the **Actions** tab in your repository to watch the run
+3. The `check` job runs tests first. The `deploy` job starts only if it passes
+4. A green tick on the `deploy` job means `/health` responded `{"ok":true}` on the server
+5. A red `×` prints the last 50 lines of `journalctl` directly in the job log
+
+### Manual deploys
+
+The workflow includes `workflow_dispatch`, so you can trigger a deploy from the Actions tab without pushing a commit: **Actions → Check and deploy → Run workflow**.
+
+<Note>
+  The `deploy` job checks `github.event_name == 'push' || github.event_name == 'workflow_dispatch'`. If only `push` were listed, clicking **Run workflow** would run the check job, skip the deploy job silently, and report the whole run green having deployed nothing.
+</Note>
+
+## Optional: GitHub Environments
+
+Attach a GitHub Environment named `production` to the `deploy` job to require a manual approval before any deploy runs:
+
+```yaml
+jobs:
+  deploy:
+    environment: production
+```
+
+This is optional and worth enabling once other people depend on the site staying up. Create the environment at **Repository → Settings → Environments → New environment**.

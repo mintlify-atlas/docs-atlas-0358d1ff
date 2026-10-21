@@ -1,0 +1,70 @@
+---
+title: "Cue: Personal Planner With Escalating Reminders"
+sidebarTitle: "Introduction"
+description: "Cue is a self-hostable personal assistant that turns plain sentences into tracked plans with conflict detection, push reminders, and intelligent daily scheduling."
+---
+
+Cue is a self-hostable personal planner built around one principle: **capture once, nag until done**. Say something in a single line — `dentist friday 6pm`, `call Ravi before lunch`, `pay rent on the 1st` — and Cue turns it into a tracked plan with reminders that escalate until the task is closed. Nothing is silently forgotten. If the nag engine runs out of escalations, the item surfaces in a triage screen that says exactly why it has gone quiet and offers four honest exits: mark done, give it a real slot, remove the deadline, or cancel it.
+
+## What Cue Is
+
+Cue is deliberately generic. A client meeting, a clinic visit, and a dentist appointment are the same shape of thing — something that happens, and something you owe afterwards. Four plain tables carry all of it: `Place`, `Contact`, `Interaction` (a logged visit or call), and `Commitment` (a plan). Nothing in the wording assumes a particular profession or use case.
+
+The core philosophy rests on three pillars:
+
+- **Capture is frictionless.** One text box understands plain English, Hinglish, and Hindi. Dates, durations, recurrences, checklists, expenses, bills, and trip ranges are all parsed locally by deterministic rules — not by a language model — so results are instant, free, offline-capable, and always traceable back to the exact words that produced each field.
+- **Reminders escalate.** Every commitment queues a reminder at its due time. The worker claims overdue rows with `FOR UPDATE SKIP LOCKED`, pushes the notification, and queues the next attempt 15 minutes later. The chain continues up to `MAX_ESCALATIONS` times. Marking done or snoozed cancels the chain; nothing ever vanishes quietly.
+- **The app works offline.** Visits logged with no signal are saved to IndexedDB and sent when the connection returns. Every visit carries a `clientId` generated on the device so that a retry on a flaky connection creates no duplicate.
+
+<Note>
+  No API key is required to run Cue's core planner. Date and recurrence parsing, conflict detection, reminder escalation, and the offline PWA all work out of the box with only a PostgreSQL database and a JWT secret. Optional features — Google/Microsoft calendar sync, AI-assisted paragraph parsing, place lookup — each have their own optional configuration.
+</Note>
+
+## Monorepo Layout
+
+Cue is an npm workspaces monorepo targeting Node ≥ 22 with TypeScript throughout.
+
+| Path | What it is |
+|---|---|
+| `apps/api` | **Fastify 5** API server, run as TypeScript via `tsx` (no separate build step). Uses **Drizzle ORM** over `postgres.js` against PostgreSQL 14+. All migrations are hand-written forward-only SQL files. |
+| `apps/web` | **React 18 PWA** built with Vite 6. Uses `react-router-dom` 7, `vite-plugin-pwa` with Workbox for precaching and offline support, and a single plain stylesheet. Capacitor-ready for the Android TWA. |
+| `packages/shared` | `@cue/shared` — Zod input schemas, DTO types, and all pure logic both sides need: the sentence parsers (`parseWhen`, `parseRecurrence`, `extractRoles`), recurrence rule engine, Hindi vocabulary tables, and uses/sections logic. Consumed as TypeScript source by both `apps/api` and `apps/web`. |
+| `android` | Bubblewrap TWA definitions and Play Store listings for the Android app (`in.vitelio.cue`). |
+
+## Key Differentiators
+
+**Deterministic parsers, not a language model.** `packages/shared/src/parseWhen.ts` handles weekdays, `tomorrow`, `in 3 days`, `next week`, `25 dec`, 12- and 24-hour clocks, parts of the day, and `for 45 min`. It returns `null` on anything it does not recognise rather than guessing. `extractRoles` reads person, place, kind, and subject out of a sentence using a small closed-set grammar. The optional LLM path (`POST /ai/extract`) exists only for multi-event paragraphs the rules genuinely cannot carry, is off by default, and costs the operator nothing until an org pastes its own provider key.
+
+**Offline PWA.** The service worker precaches the app shell; navigations fall back to `index.html`; API responses are deliberately never cached (a stale reminder list is worse than none). The offline outbox in IndexedDB replays visits idempotently via `clientId`. Push notifications work in the background on Android and on iOS once the app is installed to the home screen.
+
+**Multi-tenant with an org/role model.** Registration creates an org and sets the registering user as `owner`. Every tenant-owned table carries `orgId`; queries are scoped by `scope(req)` in `auth.ts`, which reads org and user from the JWT — never from a request body. Role (`owner` / `member`) is read from the database row on every request, not from the token, so removing access takes effect immediately.
+
+**English, Hinglish, and Hindi.** Every user-visible string has a Hindi translation. The `normalizeHinglish` parser converts Roman and Devanagari time words (`kal`, `parso`, `subah`, `shaam ko`, `baje`) into English before any other parser sees them, so `kal shaam 6 baje doctor` is understood as fluently as `tomorrow evening 6pm doctor`.
+
+## Four Core Domain Tables
+
+The entire domain is carried by four tables, defined in `apps/api/src/db/schema.ts`:
+
+| Table | What it holds |
+|---|---|
+| `places` | A named location with lat/lng, radius, phone, and an optional external ID from Google Places or OpenStreetMap. Nothing requires a location — phone calls and video meetings have none. |
+| `contacts` | A person: name, role, phone, email, org name, birthday, keep-in-touch cadence. Created inline during visit capture so a phone number caught in a car park is never lost as free text. |
+| `interactions` | A logged visit or call, with optional GPS fix, outcome, voice note, and a client-generated `clientId` for offline idempotency. |
+| `commitments` | A plan: the thing you promised to do next. Kind (`callback`, `meeting`, `task`, `followup`, `focus`), status (`pending`, `done`, `cancelled`, `deleted`), `dueAt`, duration, flexibility, priority, and links to contact, place, trip, calendar feed, and recurrence. This is what the reminder engine, conflict detection, Today screen, and search all operate on. |
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install Cue locally in five minutes — Node 22, PostgreSQL, no Docker, no API keys.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    How the monorepo, single-process API, background workers, and PWA fit together.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Every environment variable: required secrets, VAPID push keys, OAuth clients, and optional AI providers.
+  </Card>
+  <Card title="Capture" icon="bolt" href="/features/capture">
+    How the one-box capture flow works — parsers, role extraction, conflict detection, and the optional AI path.
+  </Card>
+</CardGroup>

@@ -1,0 +1,227 @@
+---
+title: "Natural Language Capture — Type It, Cue Plans It"
+sidebarTitle: "Capture"
+description: "Cue's quick-add box parses plain English, Hinglish, and Hindi sentences into structured plans, filling gaps from your history with no model required for most inputs."
+---
+
+Type one sentence and press Enter. Cue reads it, fills in what it already knows about you, checks for clashes, and saves it — reporting every assumption it made so nothing is a surprise. The full form is still one click away for anything a sentence genuinely cannot carry, but for "dentist friday 6pm" you never need it.
+
+## The `POST /api/quick` endpoint
+
+`POST /api/quick` is the single call behind the capture box. It takes the raw sentence, runs the full interpretation pipeline, fills gaps from your history, and saves the result. A companion `POST /api/quick/preview` does the same work without writing anything — this is what powers the live interpretation shown as you type.
+
+<CodeGroup>
+```http title="Request"
+POST /api/quick
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "text": "dentist friday 6pm for 45 min"
+}
+```
+
+```json title="Response (201 Created)"
+{
+  "kind": "commitment",
+  "title": "Dentist",
+  "commitmentKind": "meeting",
+  "dueAt": "2025-08-01T12:30:00.000Z",
+  "durationMinutes": 45,
+  "flexibility": "fixed",
+  "placeLabel": "Apollo Dental",
+  "assumptions": [
+    "You have done this 4 times — usually 45 min, at Apollo Dental."
+  ],
+  "summary": "Dentist — Fri 1 Aug, 6:00 pm",
+  "id": "c8a3f210-..."
+}
+```
+</CodeGroup>
+
+<Note>
+  `allowConflict: true` can be passed to save anyway when the server reports a `409 time_conflict`. The server always re-checks on save regardless of what the preview showed — a slot taken between preview and save cannot slip through.
+</Note>
+
+## `parseWhen.ts` — the deterministic date and time parser
+
+`packages/shared/src/parseWhen.ts` is a plain deterministic parser: same answer every time, works offline, costs nothing, and is debuggable when it gets something wrong. It returns `null` on anything it does not recognise rather than guessing.
+
+<Tabs>
+  <Tab title="Date formats">
+    | Input | Resolves to |
+    |-------|-------------|
+    | `friday` | The soonest Friday that has not gone past |
+    | `next friday` | The Friday of next week — always skips a week |
+    | `tomorrow` / `tmrw` | Tomorrow at 9am (time assumed) |
+    | `today` / `tonight` | Today; `tonight` implies evening (8pm) |
+    | `in 3 days` | Three days from now |
+    | `in 2 hours` | Exact wall-clock time, two hours ahead |
+    | `next week` | Seven days from now |
+    | `25 dec` | 25 December (rolls to next year if passed) |
+    | `5/9` | 5 September — **day-first** convention |
+    | `oct 2 to oct 4` | Trip date range — handled by `parseTrip` |
+  </Tab>
+  <Tab title="Time formats">
+    | Input | Resolves to |
+    |-------|-------------|
+    | `6pm` / `6:30 pm` / `6.30pm` | 18:00 / 18:30 |
+    | `2:30 p.m` | 14:30 (dots optional in both positions) |
+    | `9am` | 09:00 |
+    | `friday 6` | 18:00 (bare-hour convention: 1–7 = afternoon) |
+    | `friday 9` | 09:00 (bare-hour convention: 8–12 = morning) |
+    | `morning` / `afternoon` / `evening` | Window, not a fixed clock time |
+    | `tonight` | 20:00 and marks a `night` window |
+    | `end of day` / `eod` | 17:00 exactly |
+    | `after lunch` | 14:00, afternoon window |
+    | `before bed` | 21:00, night window |
+    | `first thing` | 09:00, morning window |
+  </Tab>
+  <Tab title="Duration">
+    | Input | Effect |
+    |-------|--------|
+    | `for 45 min` | Sets `durationMinutes: 45` |
+    | `for 2 hours` | Sets `durationMinutes: 120` |
+    | `for 1 hr` | Sets `durationMinutes: 60` |
+
+    The duration phrase is blanked out before the time is parsed, so `for 30 min` never donates its `30` to the clock.
+  </Tab>
+</Tabs>
+
+### Bare-hour convention
+
+A bare number like `friday 6` is read the way people actually speak:
+
+- **1–7** → afternoon/evening (so `friday 6` = 6pm, `friday 3` = 3pm)
+- **8–12** → morning (so `friday 9` = 9am, `friday 11` = 11am)
+
+When the half of the day is genuinely ambiguous — numbers 5, 6, 7 — `halfGuessed` is set and the preview says so: *"Read as 6 pm. Say 6 am if you meant that."*
+
+### `next friday` vs bare `friday`
+
+These are never the same day. `friday` resolves to the soonest Friday that has not gone past (including today, if today is Friday and the time hasn't passed). `next friday` always skips the current week and goes to the Friday of next week.
+
+### No time given
+
+When no time is in the sentence, 9am is assumed and `timeAssumed: true` is set. The preview shows *"time assumed"* so the assumption is visible before saving. A meal named in the sentence (`team lunch friday`) overrides the 9am default with the meal's conventional hour — lunch at 1pm, dinner at 8pm.
+
+<Warning>
+  A bare number is only read as a time when a weekday or date anchors it, or when `at` precedes it. `order 5 boxes` is not 5 o'clock.
+</Warning>
+
+## `extractRoles.ts` — who, where, and what it's about
+
+When a sentence carries structure — `with`, `for`, `regarding`, `about`, `at`, `in` — `extractRoles` reads the roles out of it rather than putting everything in the title as one undifferentiated string.
+
+<Accordion title="Example: appointment for the dentist in Sirsi regarding software demo">
+  Input: `create appointment for dentist who lives in sirsi regarding software application demo`
+
+  | Field | Value | Evidence |
+  |-------|-------|----------|
+  | Kind | appointment | `appointment` |
+  | Who | dentist | `for dentist` |
+  | Where | sirsi | `who lives in sirsi` |
+  | About | software application demo | `regarding software application demo` |
+  | **Title** | **Software application demo** | |
+</Accordion>
+
+### Role markers
+
+The parser looks for a closed set of marker words:
+
+| Marker | Role |
+|--------|------|
+| `with`, `for` | Person (when the noun is an occupation or a name) |
+| `regarding`, `about`, `re`, `w.r.t.` | Subject |
+| `at`, `in`, `near` | Place |
+| `who lives in`, `based in`, `located at` | Place (relative clause) |
+
+### Occupation lexicon
+
+`for dentist` is a person; `for the quarterly review` is a subject. The marker word alone cannot tell them apart — the occupation lexicon does. It is weighted towards the people someone in India actually books time with:
+
+`dentist`, `doctor`, `physician`, `surgeon`, `therapist`, `physio`, `lawyer`, `advocate`, `ca`, `accountant`, `plumber`, `electrician`, `carpenter`, `mechanic`, `tailor`, `barber`, `chemist`, `pharmacist`, `optician`, `vet`, `pandit`, `guruji`, and family terms (`mum`, `mom`, `dad`, `amma`, `appa`, `bhai`, `didi`, `uncle`, `aunty`).
+
+<Tip>
+  A marker word is required before `extractRoles` claims any roles. Ordinary short sentences like `call mom` go to the plain parser untouched — adding structure to a sentence that already works would make it worse, not better.
+</Tip>
+
+## `services/memory.ts` — learning from your history
+
+For any title that resembles something you have planned before, `recallSimilar` looks back through your last 365 days and fills in what it finds.
+
+<Steps>
+  <Step title="Title matching">
+    Similarity is measured with a weighted Jaccard score over tokenised titles. Stop words (`a`, `the`, `to`, `at`, etc.) are stripped first. A score of ≥ 0.6 counts as a match — so `dentist` matches `dentist appointment with Dr Shah`.
+  </Step>
+  <Step title="Duration (median, not mean)">
+    The median of all matched durations is used. One 4-hour gym session does not drag the usual 1-hour duration upwards. In testing: four visits of 3.2, 3.2, 3.2, and 90 days give a **median of 3.2** where the mean would be 24.9.
+  </Step>
+  <Step title="Usual time">
+    A consistent hour is only claimed when the mode appears in ≥ 60% of timed occurrences across at least 3 matches. Four different hours is not a routine — no time is claimed.
+  </Step>
+  <Step title="Place and contact">
+    The most frequently appearing place is used when it appears at least twice. Otherwise the most recent entry's place fills in quietly.
+  </Step>
+  <Step title="Honest language">
+    One prior occurrence: *"Last time this was at Apollo Clinic."*  
+    Multiple occurrences: *"You have done this 5 times — usually 45 min, at Apollo Dental."*  
+    History older than one year is ignored — a different era of someone's life.
+  </Step>
+</Steps>
+
+## AI fallback for paragraphs
+
+The rule-based parser handles the ordinary cases instantly, offline, for free. Paragraphs that require a language model to understand go to `POST /api/ai/extract` — but only when certain conditions are met:
+
+<CardGroup cols={2}>
+  <Card title="When AI is invoked" icon="sparkles">
+    - Text is longer than **25 characters**, AND
+    - `parseWhen` could not read a date from it, AND
+    - The AI provider is configured by the org owner
+  </Card>
+  <Card title="What AI returns" icon="eye">
+    **Proposals only.** The user sees what was extracted and ticks what they want. A misread date costs a rejected suggestion, never a wrong entry.
+  </Card>
+</CardGroup>
+
+`dentist friday 6pm` never costs an AI call. The AI is off by default — each org brings its own key (Anthropic or Ollama). Without a key, the rules' reading stands.
+
+## Checklist parsing
+
+A colon followed by at least two items creates a checklist attached to the plan:
+
+```
+go shopping this evening: milk, bread, eggs
+```
+
+This saves the plan `go shopping this evening` with three checklist items. The items are ticked one at a time, flipped on-screen immediately and written in the background. Each item is its own database row rather than a JSON column — ticking one is a single cheap write, not a read-modify-write of the whole list from a phone.
+
+The rules are strict to avoid false positives:
+
+| Input | Result |
+|-------|--------|
+| `go shopping: milk, bread, eggs` | ✅ Checklist |
+| `standup at 9:30` | ✅ Plan (colon in a time, not a list) |
+| `client call: https://meet…` | ✅ Plan (only one item after colon) |
+| `call mum, dad and the bank` | ✅ Plan (comma but no colon) |
+
+## Hindi and Hinglish support
+
+Common Hindi time words are normalised to English before any parser sees them, so `mom ko sham ko call karna hai` is understood:
+
+| Hindi/Hinglish | English equivalent |
+|----------------|--------------------|
+| `kal` | tomorrow |
+| `parso` | day after tomorrow |
+| `subah` | morning |
+| `dopahar` | afternoon |
+| `sham ko` / `shaam ko` | in the evening |
+| `raat` | night |
+| `karna hai` | (intent marker, stripped) |
+
+Only the time words change. The place and activity pass through in their original words, so the title that comes back is still yours.
+
+## Undo
+
+Everything saved through `POST /api/quick` is one keystroke from **Undo**. The endpoint returns the saved record's `id` (and `ids` for multi-row saves like recurrences), and a `DELETE /api/quick/:kind/:id` removes it immediately — a true hard delete for a two-second-old mistake, leaving no history trail.
