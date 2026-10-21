@@ -1,7 +1,7 @@
 ---
-title: "Recurrences API — Create and Manage Repeating Plans"
+title: "Recurrences API — Repeating Plans and Occurrence Edits"
 sidebarTitle: "Recurrences"
-description: "CRUD for recurring rules — stored as rules, with real commitment rows generated in a rolling 120-day window that the reminder engine works against directly."
+description: "Store a repeat rule once; Cue generates commitment rows in a rolling window. Edit or stop a series, or detach a single occurrence to change it on its own."
 ---
 
 Recurrences store a repeating rule once, then write real `commitments` rows for each occurrence in a rolling 120-day window. The reminder engine, conflict detection, and every UI view are completely unaware that recurrence exists — they work against ordinary commitment rows, which is what lets a recurring meeting clash with a new plan just like a hand-created one would.

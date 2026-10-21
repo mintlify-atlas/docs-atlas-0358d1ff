@@ -1,7 +1,7 @@
 ---
-title: "Authenticate with the Cue API Using JWT Bearer Tokens"
+title: "Cue API Authentication — JWT, OAuth, and Password Reset"
 sidebarTitle: "Authentication"
-description: "Cue uses JWT bearer tokens — register to create an org, login to get a token, then pass it in the Authorization header on every subsequent request."
+description: "Register for a 30-day JWT, pass it as Bearer on every request. Roles are read from the database on each call so revoking access takes effect immediately."
 ---
 
 The Cue API uses signed JWT bearer tokens for authentication. Registering creates both your user account and an organisation (tenant) in one step — the registering user automatically becomes the org `owner`. After registration or login, include the token in the `Authorization` header on every request to protected routes.
@@ -51,7 +51,6 @@ curl -X POST http://localhost:3002/api/auth/register \
     <ResponseField name="id" type="string (uuid)">Unique user ID.</ResponseField>
     <ResponseField name="name" type="string">Display name as supplied.</ResponseField>
     <ResponseField name="email" type="string">Normalised email address.</ResponseField>
-    <ResponseField name="role" type="string">`"owner"` — the first user of an org is always its owner.</ResponseField>
   </Expandable>
 </ResponseField>
 
@@ -215,14 +214,14 @@ Returns `{ "ok": true }` on success, or `403 wrong_password` if the current pass
 
 ## OAuth Sign-In (Google / Microsoft)
 
-Cue supports sign-in via Google and Microsoft OAuth. Both providers follow the same flow:
+Cue supports connecting Google and Microsoft accounts for calendar sync. Both providers follow the same flow:
 
-1. **Start** — Redirect the user to `GET /api/oauth/:provider/start`. This stores a short-lived state token and redirects the browser to the provider's consent screen.
+1. **Connect** — POST to `POST /api/oauth/:provider/connect`. This stores a short-lived state token and returns the provider's consent screen URL for the browser to navigate to.
 2. **Consent** — The user approves on the provider's own page.
-3. **Callback** — The provider redirects back to `GET /api/oauth/:provider/callback`. Cue exchanges the code, creates or updates the connected account, issues a JWT, and redirects to the web app with the token.
+3. **Callback** — The provider redirects back to `GET /api/oauth/:provider/callback`. Cue exchanges the code, creates or updates the connected account, and redirects to the web app.
 
 <Note>
-  OAuth sign-in requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (for Google) or `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (for Microsoft) to be set in `.env`. These are free OAuth credentials — not billed API keys.
+  OAuth requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` (for Google) or `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` (for Microsoft) to be set in `.env`. These are free OAuth credentials — not billed API keys.
 </Note>
 
 The redirect URI registered in your provider's console must match exactly:

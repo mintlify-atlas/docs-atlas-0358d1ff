@@ -96,7 +96,9 @@ AI_DEFAULT_MODEL=claude-haiku-5-5
 # ------------------------------------------- reading lines the rules cannot
 ANTHROPIC_API_KEY=
 CAPTURE_AI_MODEL=claude-haiku-5-5
+# Readings per person per day, a ceiling on what one account can cost.
 CAPTURE_AI_DAILY_LIMIT=40
+CAPTURE_AI_DEMO_LIMIT=8
 
 # ------------------------------------------------------- the Android app
 ANDROID_PACKAGE=in.vitelio.cue
@@ -329,6 +331,26 @@ These variables enable the **Connect a Microsoft account** flow. Also not billed
 
 <ParamField path="CAPTURE_AI_DAILY_LIMIT" type="number" default="40">
   The maximum number of AI readings per person per day for the capture assistant. Acts as a per-account cost ceiling.
+</ParamField>
+
+<ParamField path="CAPTURE_AI_DEMO_LIMIT" type="number" default="8">
+  The maximum number of AI readings per day for demo accounts — a lower ceiling than `CAPTURE_AI_DAILY_LIMIT` to prevent demo users from running up disproportionate API costs.
+</ParamField>
+
+---
+
+## Admin & Exam Watch
+
+These variables are read by the server but are not in `.env.example` because they are only relevant to deployments using the exam-tracking feature.
+
+<ParamField path="ADMIN_EMAILS" type="string">
+  Comma-separated list of account email addresses permitted to review official exam notices before they are sent to everyone tracking an exam. Leave blank and notices wait indefinitely until a reviewer approves them. Addresses are compared case-insensitively.
+
+  **Example:** `admin@example.com,reviewer@example.com`
+</ParamField>
+
+<ParamField path="NOTICE_WATCH" type="string" default="on">
+  Set to `off` to stop the background worker that reads exam boards' public notice pages on a timer. Any other value (or blank) leaves it running. Disable on deployments that do not use the exam-tracking feature.
 </ParamField>
 
 ---

@@ -1,7 +1,7 @@
 ---
-title: "Visits API — Log In-Person and Virtual Meetings"
+title: "Visits API — Log Interactions with Contacts and Places"
 sidebarTitle: "Visits"
-description: "POST /api/visits logs a meeting or interaction, creating contacts and commitments inline. Includes idempotent clientId for offline outbox sync."
+description: "Log visits and calls with follow-up commitments in one transaction. Supply a clientId for idempotent offline retries — no duplicates on reconnect."
 ---
 
 Visits (stored internally as `interactions`) record every meeting, phone call, or in-person visit. The defining feature of the log-visit flow is that a new contact and a follow-up commitment can be created in the same transaction as the visit itself — a phone number captured in the field is the most perishable thing in this flow, so it is never left as free text to be re-entered later. Commitments linked to a visit survive even if the visit is deleted, because a promise you made does not stop existing because you deleted the note about the meeting.

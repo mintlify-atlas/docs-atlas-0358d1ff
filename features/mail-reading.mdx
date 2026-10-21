@@ -1,7 +1,7 @@
 ---
-title: "Mail Reading — Inbox to Plans Automatically"
+title: "Cue Mail Reading: Gmail and Outlook to Planner Entries"
 sidebarTitle: "Mail Reading"
-description: "Cue connects to Gmail and Outlook read-only, extracting tickets, hotel stays, parcels, bills, insurance reminders, and FASTag top-ups into your planner automatically."
+description: "Cue reads Gmail and Outlook read-only, turning train tickets, parcels, bills, insurance renewals, and FASTag alerts into planner entries automatically."
 ---
 
 Cue reads your inbox and turns what it finds into planner entries — train tickets become trips, utility bills become bill reminders, parcel dispatches become delivery trackers. This happens in the background without you opening the app. Nothing leaves your server, no AI is involved, and the inbox is never modified.
@@ -115,8 +115,8 @@ Each message is stored with the version of the reader that processed it (`reader
 
 <CodeGroup>
 
-```bash List connected mail accounts
-GET /api/mail
+```bash List recent finds from email
+GET /api/mail/found
 Authorization: Bearer <token>
 ```
 
@@ -127,35 +127,23 @@ Authorization: Bearer <token>
 
 </CodeGroup>
 
-The list endpoint returns each connected account, when mail was last checked, any error from the last run, and recent finds (newest first) — exactly what Cue extracted from which message, in plain words, so you can see what it did with your email.
+The `GET /api/mail/found` endpoint returns the 20 most recent things Cue extracted from email (newest first) — exactly what it found and which account it came from, in plain words, so nothing it does there is hidden.
 
 ### Recent finds shape
 
 ```json
-{
-  "accounts": [
-    {
-      "id": "uuid",
-      "email": "you@gmail.com",
-      "provider": "google",
-      "mailEnabled": true,
-      "mailCheckedAt": "2025-10-03T09:15:00.000Z",
-      "mailError": null
-    }
-  ],
-  "recentFinds": [
-    {
-      "found": "IRCTC 12345 Bengaluru → Mumbai, Fri 3 Oct, 06:15",
-      "at": "2025-10-03T09:15:22.000Z",
-      "email": "you@gmail.com"
-    },
-    {
-      "found": "HDFC Credit Card: ₹4,250 due Mon 6 Oct",
-      "at": "2025-10-03T09:15:18.000Z",
-      "email": "you@gmail.com"
-    }
-  ]
-}
+[
+  {
+    "found": "IRCTC 12345 Bengaluru → Mumbai, Fri 3 Oct, 06:15",
+    "at": "2025-10-03T09:15:22.000Z",
+    "email": "you@gmail.com"
+  },
+  {
+    "found": "HDFC Credit Card: ₹4,250 due Mon 6 Oct",
+    "at": "2025-10-03T09:15:18.000Z",
+    "email": "you@gmail.com"
+  }
+]
 ```
 
 Each `found` string is in the user's own language (English or Hindi) and names what was extracted. The booking's own name (train number, airline route, insurer name) is kept as the email gave it — only the surrounding words are translated.

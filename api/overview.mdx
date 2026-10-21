@@ -1,7 +1,7 @@
 ---
-title: "Cue REST API — Endpoints, Auth, and Error Codes"
+title: "Cue REST API — Endpoints, Auth, and Error Reference"
 sidebarTitle: "Overview"
-description: "The Cue API is a Fastify 5 REST API at /api — all routes require JWT bearer auth, responses are JSON, and errors follow a consistent shape with string codes."
+description: "Base URLs, JWT auth, org scoping, error codes, and a full route inventory for the Cue Fastify 5 REST API — dev and production configurations explained."
 ---
 
 The Cue API is a [Fastify 5](https://fastify.dev) REST API that powers every feature of the Cue personal planner. All request and response bodies are JSON. Every route is scoped to the authenticated caller's organisation — the org ID is derived from the JWT and never trusted from the request body, so a caller cannot read or write across tenant boundaries.
@@ -23,10 +23,10 @@ All routes require an `Authorization: Bearer <jwt>` header **except**:
 
 - `GET /health` — server health check
 - `POST /api/auth/register` — create an account
+- `POST /api/auth/demo` — create a temporary demo account
 - `POST /api/auth/login` — obtain a JWT
 - `POST /api/auth/forgot` — request a password-reset link
 - `POST /api/auth/reset` — spend a password-reset token
-- `GET /api/oauth/:provider/start` — begin an OAuth flow
 - `GET /api/oauth/:provider/callback` — OAuth redirect target
 
 Obtain a token with `POST /api/auth/login`, then pass it in the `Authorization` header on every subsequent request. Tokens are signed with `JWT_SECRET` and expire after **30 days**. The user's role is read from the database on every request — not from the JWT — so removing access takes effect immediately rather than at token expiry.
@@ -45,7 +45,6 @@ Every error from the API follows a consistent JSON envelope with a stable string
 |---|---|---|
 | `400` | `invalid_input` | Request body failed schema validation (Zod error or bad UUID in URL) |
 | `401` | `unauthorized` | Missing or invalid JWT |
-| `403` | `forbidden` | Valid JWT but insufficient permissions (e.g. member-only action requires owner role) |
 | `403` | `wrong_password` | Delete-account or change-password request supplied the wrong current password |
 | `404` | `not_found` | Resource does not exist or belongs to a different org |
 | `409` | `email_taken` | Registration attempted with an address already in use |
@@ -65,7 +64,7 @@ When saving or rescheduling a commitment produces a `409`, the response includes
 ```json
 {
   "error": "time_conflict",
-  "clashes": [
+  "conflicts": [
     {
       "id": "uuid",
       "title": "Team standup",
@@ -124,8 +123,10 @@ A full inventory of every route exposed by the API:
 |---|---|---|
 | `GET` | `/health` | Server health and push-notification status |
 | `POST` | `/api/auth/register` | Create an account and org; caller becomes the org owner |
+| `POST` | `/api/auth/demo` | Create a temporary demo account (rate-limited per IP) |
 | `POST` | `/api/auth/login` | Authenticate and receive a JWT |
-| `POST` | `/api/auth/logout` | Invalidate the current session |
+| `GET` | `/api/auth/me` | Get current user profile, org info, and filled sections |
+| `DELETE` | `/api/auth/me` | Delete your account and all data (password confirmation required) |
 | `POST` | `/api/auth/forgot` | Request a password-reset email (requires SMTP) |
 | `POST` | `/api/auth/reset` | Spend a password-reset token to set a new password |
 | `POST` | `/api/auth/change-password` | Change password while signed in (requires current password) |
@@ -133,33 +134,75 @@ A full inventory of every route exposed by the API:
 | `DELETE` | `/api/auth/avatar` | Remove the current avatar |
 | `GET` | `/api/auth/avatar/:id` | Serve the avatar image for a user in the same org |
 | `PATCH` | `/api/auth/profile` | Update display name and timezone |
-| `DELETE` | `/api/auth/me` | Delete your account and all data (password confirmation required) |
 | `GET` | `/api/me/preferences` | Retrieve all notification and scheduling preferences |
-| `PATCH` | `/api/me/preferences` | Update notification prefs, work hours, language, exam settings, and more |
+| `PATCH` | `/api/me/preferences` | Update notification prefs, work hours, language, and more |
 | `GET` | `/api/me/filled` | Which sections have data (drives tab visibility) |
-| `GET` | `/api/commitments` | List upcoming commitments |
+| `GET` | `/api/commitments/agenda` | Today screen buckets: overdue, today, upcoming, done, waiting |
+| `GET` | `/api/commitments/range` | All commitments within a date range (used by the calendar grid) |
+| `GET` | `/api/commitments/queue` | Diagnostic: pending reminder count and next fire time |
 | `POST` | `/api/commitments` | Create a commitment (clash-checked) |
+| `GET` | `/api/commitments/:id` | Fetch a single commitment |
 | `PATCH` | `/api/commitments/:id` | Update a commitment; editing the time re-runs the clash check |
 | `DELETE` | `/api/commitments/:id` | Soft-delete a commitment |
-| `POST` | `/api/commitments/:id/reschedule` | Move to a new time (clash-checked, resets reminder chain) |
-| `GET` | `/api/commitments/range` | All commitments within a date range (used by the calendar grid) |
+| `POST` | `/api/commitments/:id/done` | Mark a commitment done (idempotent) |
+| `POST` | `/api/commitments/:id/cancel` | Cancel a commitment |
+| `POST` | `/api/commitments/:id/snooze` | Push forward from now; resets reminder chain |
+| `POST` | `/api/commitments/:id/reschedule` | Move to a new absolute time (clash-checked) |
+| `GET` | `/api/commitments/:id/slots` | Find free time slots for rescheduling this commitment |
+| `GET` | `/api/commitments/:id/prep` | Meeting prep: last related meeting and open follow-ups |
+| `POST` | `/api/commitments/:id/wrap-up` | Close a meeting and create follow-up commitments |
+| `POST` | `/api/commitments/check-conflicts` | Pre-flight clash check for a proposed time |
+| `POST` | `/api/commitments/suggest-slots` | Suggest free slots for a flexible item |
 | `GET` | `/api/visits` | List visits (logged interactions) |
 | `POST` | `/api/visits` | Log a visit; `clientId` makes offline retries idempotent |
+| `GET` | `/api/visits/:id` | Single visit with its linked commitments |
+| `PATCH` | `/api/visits/:id` | Update a visit record |
+| `DELETE` | `/api/visits/:id` | Delete a visit (commitments survive) |
 | `GET` | `/api/contacts` | List contacts |
 | `POST` | `/api/contacts` | Create a contact |
+| `GET` | `/api/contacts/organizations` | Distinct organisation names for autocomplete |
+| `POST` | `/api/contacts/import` | Bulk import from device Contacts Picker |
+| `GET` | `/api/contacts/:id` | Single contact with visit history and commitments |
+| `PATCH` | `/api/contacts/:id` | Update a contact |
+| `DELETE` | `/api/contacts/:id` | Delete a contact (history survives) |
+| `POST` | `/api/contacts/:id/touched` | Record an out-of-app contact without a full visit log |
+| `POST` | `/api/contacts/:id/touch-later` | Snooze keep-in-touch prompt |
 | `GET` | `/api/trips` | List trips |
 | `POST` | `/api/trips` | Create a trip |
-| `POST` | `/api/quick` | Natural-language one-line capture (`POST /api/quick`) |
-| `POST` | `/api/ai/extract` | AI multi-event extraction from a paragraph — returns proposals |
-| `GET` | `/api/insights` | Day brief and behavioural insights |
-| `GET` | `/api/triage` | Stuck/overdue commitments with diagnosis and suggested actions |
+| `GET` | `/api/trips/:id` | Single trip with its planned commitments and waiting intentions |
+| `PATCH` | `/api/trips/:id` | Update a trip |
+| `DELETE` | `/api/trips/:id` | Delete a trip (linked commitments are detached, not deleted) |
+| `POST` | `/api/trips/:id/packing` | Generate a packing list commitment for the trip |
 | `GET` | `/api/recurrences` | List recurring rules |
 | `POST` | `/api/recurrences` | Create a recurring rule |
+| `GET` | `/api/recurrences/:id` | Single rule with all generated occurrences |
+| `PATCH` | `/api/recurrences/:id` | Edit a series (future untouched occurrences are regenerated) |
+| `DELETE` | `/api/recurrences/:id` | Stop a series (future occurrences deleted; history kept) |
+| `POST` | `/api/recurrences/:id/detach/:commitmentId` | Break one occurrence free from its series |
 | `GET` | `/api/calendar-feeds` | List connected calendar feeds |
-| `POST` | `/api/calendar-feeds` | Add a calendar feed (URL or file) |
-| `GET` | `/api/places/:id/suggestion` | Suggest a follow-up for a known place based on visit history |
-| `POST` | `/api/places/lookup` | Look up businesses at given coordinates |
+| `POST` | `/api/calendar-feeds` | Add a calendar feed by iCal URL |
+| `POST` | `/api/calendar-feeds/upload` | Import events from an `.ics` file |
+| `POST` | `/api/calendar-feeds/:id/sync` | Trigger an on-demand sync |
+| `PATCH` | `/api/calendar-feeds/:id` | Update feed settings (label, reminders, history window) |
+| `DELETE` | `/api/calendar-feeds/:id` | Disconnect a calendar and remove mirrored events |
+| `POST` | `/api/quick/preview` | Dry-run: parse a sentence without saving |
+| `POST` | `/api/quick` | Natural-language one-line capture — parses, fills gaps, and saves |
+| `GET` | `/api/quick/suggestions` | Frequently-captured titles for one-tap suggestions |
+| `DELETE` | `/api/quick/:kind/:id` | Undo — hard-delete an item created by quick-add |
+| `GET` | `/api/insights` | Day brief and behavioural insights |
+| `GET` | `/api/triage` | Stuck/overdue commitments with diagnosis and suggested actions |
+| `POST` | `/api/triage` | Apply triage decisions in bulk |
+| `GET` | `/api/plan/tomorrow` | Preview tomorrow's proposed schedule |
+| `POST` | `/api/plan/tomorrow` | Accept proposed schedule slots |
+| `POST` | `/api/sample-day` | Load a sample week of data |
+| `DELETE` | `/api/sample-day` | Remove all sample data |
+| `POST` | `/api/ai/extract` | AI multi-event extraction from a paragraph — returns proposals |
+| `GET` | `/api/people/summary` | People list: open commitments with each person |
+| `GET` | `/api/people/keep-in-touch` | Everyone you mean to keep in touch with, longest overdue first |
+| `GET` | `/api/people/:id/overview` | One person: meetings, owed items, colleagues |
+| `GET` | `/api/accounts/overview` | One company or clinic: stage, contacts, open items |
+| `GET` | `/api/oauth/status` | Connected OAuth accounts for the current user |
+| `POST` | `/api/oauth/:provider/connect` | Begin an OAuth flow (Google or Microsoft) |
+| `GET` | `/api/oauth/:provider/callback` | OAuth redirect target — issues a token and redirects |
 | `GET` | `/api/search` | Full-text search across commitments, contacts, trips, intentions, and more |
 | `GET` | `/api/intentions/nearby` | Intentions for places within 40 km of supplied coordinates |
-| `GET` | `/api/oauth/:provider/start` | Begin an OAuth flow (Google or Microsoft) |
-| `GET` | `/api/oauth/:provider/callback` | OAuth redirect target — issues a token and redirects |

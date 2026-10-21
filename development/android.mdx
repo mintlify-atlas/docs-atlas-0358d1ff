@@ -1,7 +1,7 @@
 ---
-title: "Build the Cue Android App with Bubblewrap TWA"
+title: "Cue Android App: Bubblewrap TWA, Asset Links, Capacitor"
 sidebarTitle: "Android"
-description: "Cue ships as a Trusted Web Activity (TWA) via Bubblewrap — the Android app is the same React PWA, with native geolocation and notification support via Capacitor."
+description: "Cue's Android app is a Bubblewrap TWA. Configure Digital Asset Links, sign and build via GitHub Actions, and use Capacitor to add background geolocation."
 ---
 
 Cue's Android app is not a separate codebase. It is a thin Android shell — a Trusted Web Activity — that displays the same React PWA full-screen, with no browser chrome. Every change deployed to the website is in the Android app the moment it goes live. A new app build is only needed when something in the shell itself changes: the package name, icons, shortcuts, or the Android version number.
@@ -51,14 +51,17 @@ The share target (`GET /share`) is also declared here, allowing text shared from
 
 Digital Asset Links (`/.well-known/assetlinks.json`) is the mechanism that tells Android the app and the website trust each other. Without it, Android opens the site in Chrome with an address bar visible — the TWA full-screen mode is only activated when the site has vouched for the app's signing key.
 
-The API generates and serves this file from two environment variables:
+The API generates and serves this file from environment variables. Both apps — Cue and Cue Exams — are included in the same response:
 
 ```ini
 ANDROID_PACKAGE=in.vitelio.cue
 ANDROID_CERT_SHA256=AA:BB:CC:…,DD:EE:FF:…
+
+ANDROID_EXAMS_PACKAGE=in.vitelio.cue.exams
+ANDROID_EXAMS_CERT_SHA256=AA:BB:CC:…,DD:EE:FF:…
 ```
 
-`ANDROID_CERT_SHA256` is a comma-separated list of SHA-256 fingerprints. You need **both** the Play app-signing key fingerprint and the upload key fingerprint, because Play re-signs the app with its own key after you upload it.
+`ANDROID_CERT_SHA256` and `ANDROID_EXAMS_CERT_SHA256` are each a comma-separated list of SHA-256 fingerprints. You need **both** the Play app-signing key fingerprint and the upload key fingerprint for each app, because Play re-signs the app with its own key after you upload it.
 
 <Steps>
   <Step title="Upload your release bundle to Play">

@@ -1,7 +1,7 @@
 ---
-title: "Testing Strategy — Unit, Web Scripts, and API Against Real PostgreSQL"
+title: "Testing: Unit, Web Scripts, and API Integration Tests"
 sidebarTitle: "Testing"
-description: "Cue runs three test suites: pure-function unit tests, web script tests, and API integration tests against a real PostgreSQL database — no mocks for the data layer."
+description: "Three test suites — pure-function unit tests, web script invariants, and API tests against real PostgreSQL — all run with a single npm test command."
 ---
 
 Cue has three test suites, each targeting a different layer of the codebase. They run in sequence under a single command, use Node's built-in `node:test` runner via `tsx`, and require no additional test framework setup. The API suite is the most important: it runs against a real PostgreSQL instance, not a mock or an in-memory substitute.
@@ -31,7 +31,7 @@ npm run test:unit && npm run test:web && npm run test:api
     Tests pure functions in `packages/shared/src` — the parsers, recurrence rules, and Hindi translation tables. No database, no network, no side effects. These are the fastest tests in the project.
 
     **What is covered:**
-    - `parseWhen` — 29 cases covering every date and time convention: weekdays, `tomorrow`, `in 3 days`, `next week`, `25 dec`, day-first `5/9`, 12- and 24-hour clocks, parts of the day (`shaam`, `subah`), and `for 45 min`
+    - `parseWhen` — 42 cases covering every date and time convention: weekdays, `tomorrow`, `in 3 days`, `next week`, `25 dec`, day-first `5/9`, 12- and 24-hour clocks, parts of the day (`shaam`, `subah`), and `for 45 min`
     - Recurrence rules — `every tuesday`, `last day of every month`, `second tuesday of the month`, `every other friday until 15 December`
     - Hindi/Hinglish normalisation tables — Devanagari and Roman time words mapped to their English equivalents before any parser runs
 

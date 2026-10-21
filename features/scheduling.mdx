@@ -1,7 +1,7 @@
 ---
 title: "Conflict Detection, Free Slots, and the Daily Schedule"
 sidebarTitle: "Scheduling"
-description: "Cue checks time-slot clashes, travel-distance conflicts between places, and proposes genuinely free slots for overdue items — all without a mapping service."
+description: "Cue checks time-slot clashes and travel-distance conflicts, then proposes genuinely free slots for overdue items — all without a mapping service."
 ---
 
 Cue runs two independent conflict checks whenever you save a plan: one for time (do two fixed plans overlap?) and one for travel (is there enough time to get from one place to the other?). Neither check ever blocks you — every conflict offers choices. Nothing is written until you decide.
@@ -80,10 +80,8 @@ The moment a preset, an exact time, or a parsed phrase sets the time explicitly,
 
 ```json title="Response (200 OK)"
 {
-  "id": "abc-...",
-  "dueAt": "2025-08-01T10:30:00.000Z",
-  "conflicts": [],
-  "suggestions": []
+  "ok": true,
+  "dueAt": "2025-08-01T10:30:00.000Z"
 }
 ```
 </CodeGroup>
@@ -95,12 +93,12 @@ When two fixed plans in different places have a gap too small to travel between 
 **Estimation method, not routing:**
 
 ```
-travel_hours = straight_line_km × 1.35 ÷ TRAVEL_SPEED_KMH + 0.5
+travel_minutes = (straight_line_km × 1.35 ÷ TRAVEL_SPEED_KMH) × 60 + 30
 ```
 
 - The `1.35` multiplier accounts for roads not being straight lines
 - `TRAVEL_SPEED_KMH` defaults to 45 km/h
-- The 0.5-hour overhead covers leaving, parking, and arriving
+- The 30-minute fixed overhead covers leaving, parking, and arriving
 
 The UI says *"estimated, not a routed journey"* rather than implying precision nobody has. A maps provider is an upgrade, not a prerequisite.
 

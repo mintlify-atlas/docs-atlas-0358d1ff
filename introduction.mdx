@@ -1,7 +1,7 @@
 ---
-title: "Cue: Personal Planner With Escalating Reminders"
+title: "Cue: Self-Hostable Personal Planner With Reminders"
 sidebarTitle: "Introduction"
-description: "Cue is a self-hostable personal assistant that turns plain sentences into tracked plans with conflict detection, push reminders, and intelligent daily scheduling."
+description: "Cue turns a sentence into a tracked plan with escalating push reminders, conflict detection, and offline support. Self-hostable — no API key required."
 ---
 
 Cue is a self-hostable personal planner built around one principle: **capture once, nag until done**. Say something in a single line — `dentist friday 6pm`, `call Ravi before lunch`, `pay rent on the 1st` — and Cue turns it into a tracked plan with reminders that escalate until the task is closed. Nothing is silently forgotten. If the nag engine runs out of escalations, the item surfaces in a triage screen that says exactly why it has gone quiet and offers four honest exits: mark done, give it a real slot, remove the deadline, or cancel it.
@@ -61,7 +61,7 @@ The entire domain is carried by four tables, defined in `apps/api/src/db/schema.
   <Card title="Architecture" icon="sitemap" href="/architecture">
     How the monorepo, single-process API, background workers, and PWA fit together.
   </Card>
-  <Card title="Configuration" icon="sliders" href="/configuration">
+  <Card title="Configuration" icon="sliders" href="/configuration/environment">
     Every environment variable: required secrets, VAPID push keys, OAuth clients, and optional AI providers.
   </Card>
   <Card title="Capture" icon="bolt" href="/features/capture">

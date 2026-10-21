@@ -1,7 +1,7 @@
 ---
-title: "Self-Host Cue on Your Own Linux Server"
+title: "Self-Host Cue on Your Own Linux Server (Full Guide)"
 sidebarTitle: "Self-Hosted"
-description: "Deploy Cue on any Ubuntu 22.04+ or Debian 12+ server with Node 22, PostgreSQL, and Caddy or nginx — systemd service, HTTPS via Let's Encrypt."
+description: "Deploy Cue on Ubuntu 22.04+, Debian 12+, or Amazon Linux 2023 with Node 22, PostgreSQL, and Caddy or nginx — systemd service, HTTPS via Let's Encrypt."
 ---
 
 Running Cue on your own server gives you full control over your data, costs nothing beyond the server itself, and works on any Linux machine with a public IP. This guide walks through a complete production setup: PostgreSQL, a systemd service, and Caddy or nginx for TLS. Expect to spend about an hour the first time.
@@ -239,7 +239,7 @@ Running Cue on your own server gives you full control over your data, costs noth
       <Tab title="Caddy">
         Caddy obtains and renews the TLS certificate automatically — no certbot, no cron job. Add a block to `/etc/caddy/Caddyfile`:
 
-        ```
+        ```text
         your-domain.com {
             reverse_proxy 127.0.0.1:3002
         }

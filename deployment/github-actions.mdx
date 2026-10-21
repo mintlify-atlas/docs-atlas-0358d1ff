@@ -1,5 +1,5 @@
 ---
-title: "Automated Deployment with GitHub Actions"
+title: "Automated Cue Deployments via GitHub Actions CI/CD"
 sidebarTitle: "GitHub Actions"
 description: "Cue ships a GitHub Actions workflow that runs the full test suite on every push, then deploys main to your server via SSH after all checks pass."
 ---
@@ -36,9 +36,11 @@ Runs only on pushes to `main` (and on manual `workflow_dispatch`), only after jo
   **The health poll is what makes the green tick mean something.** Without it, a service that crash-loops on startup reports success. The first you would hear of a broken deploy is that reminders stopped arriving. If `/health` does not respond within 20 seconds, the job exits non-zero and you get an email before any users notice.
 </Warning>
 
-### Why hard reset, not merge
+### Why a tarball, not a git pull
 
-The deploy does `git fetch` then `git reset --hard` to the pushed commit rather than `git pull`. This makes the server's working tree reproducible — the exact state of the commit, every time, with no local divergence possible. Untracked files (including `.env`) are left alone by `reset --hard`, and `.env` is in `.gitignore` so it can never be committed accidentally.
+The server never runs `git`. The runner builds the web app, packages everything the server needs into a tarball (`release.tar.gz`), and streams it over SSH stdin. On the server, stale files are removed first (`rm -rf`) and then the tarball is extracted. This means the server's working tree is always the exact state of the pushed commit — no local divergence possible.
+
+Untracked files (including `.env`) are left alone because the extract only writes the paths included in the tarball, and `.env` is never included. It is in `.gitignore` and must never be committed. A side benefit: the server never needs to install Vite, TypeScript, esbuild, or drizzle-kit — only runtime dependencies are installed via `npm ci --omit=dev`.
 
 ### Concurrency group
 
@@ -48,19 +50,18 @@ concurrency:
   cancel-in-progress: false
 ```
 
-This serialises deploys on the same branch. Two overlapping runs would race on the reset, the install, and the migration — the loser would leave the server in a state neither commit describes. `cancel-in-progress: false` queues the second run rather than cancelling it, so no push is silently skipped.
+This serialises deploys on the same branch. Two overlapping runs would race on the tarball extract, the install, and the migration — the loser would leave the server in a state neither commit describes. `cancel-in-progress: false` queues the second run rather than cancelling it, so no push is silently skipped.
 
-## Two SSH key pairs
+## The SSH key pair
 
-This is the part that most commonly trips people up. There are two key pairs, pointing in **opposite directions**. Mixing them up produces a "permission denied" that looks identical either way.
+One key pair is all that is needed — from GitHub Actions to your server. The server never contacts GitHub directly, so there is no second key pair to configure.
 
 | Direction | Private key location | Public key location |
 |-----------|---------------------|---------------------|
 | GitHub Actions → your server | GitHub secret `DEPLOY_SSH_KEY` | Server `~/.ssh/authorized_keys` |
-| Your server → GitHub (for `git fetch`) | Server `~/.ssh/id_ed25519` | Repository → Settings → **Deploy keys** (read-only) |
 
 <Note>
-  The second pair (server → GitHub) is only needed for **private repositories**. Without it, `git fetch` on the server fails with a repository-level permission error, not a server connection error — the error message mentions the repository, not the server, which is what makes it easy to mistake for the wrong problem.
+  The runner builds the web app, packages the release into a tarball, and streams it to your server over SSH stdin. The server never runs `git fetch` or any other git command — no GitHub deploy key is needed on the server side.
 </Note>
 
 ## GitHub repository settings
@@ -123,34 +124,19 @@ In your repository: **Settings → Secrets and variables → Actions**
 
     For Ubuntu / Debian (paths are `/bin/`):
 
-    ```
+    ```text
     ubuntu ALL=(ALL) NOPASSWD: /bin/systemctl restart cue, /bin/journalctl -u cue *
     ```
 
     <Warning>
       **Amazon Linux 2023 uses different paths.** `systemctl` and `journalctl` live under `/usr/bin`, not `/bin`. Sudoers matches the literal path, so list both to be safe, and use `ec2-user` as the login user:
 
-      ```
+      ```text
       ec2-user ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart cue, /bin/systemctl restart cue, /usr/bin/journalctl -u cue *, /bin/journalctl -u cue *
       ```
     </Warning>
   </Step>
 
-  <Step title="(Private repos only) Add a server-to-GitHub deploy key">
-    If your repository is private, the server needs its own key to `git fetch` from GitHub. Generate a separate key on the server:
-
-    ```bash
-    ssh-keygen -t ed25519 -C "cue-server-deploy" -f ~/.ssh/id_ed25519 -N ""
-    ```
-
-    Then copy the public key:
-
-    ```bash
-    cat ~/.ssh/id_ed25519.pub
-    ```
-
-    In GitHub: **Repository → Settings → Deploy keys → Add deploy key**. Paste the public key, enable **read-only** access.
-  </Step>
 </Steps>
 
 ## Triggering and monitoring deploys

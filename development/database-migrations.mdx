@@ -1,7 +1,7 @@
 ---
 title: "Database Migrations — Forward-Only SQL with Drizzle"
 sidebarTitle: "Migrations"
-description: "Cue uses forward-only SQL migrations in apps/api/migrations/, run once per file in a transaction and recorded in _migrations — drizzle-kit push is not used."
+description: "Cue uses hand-written SQL migrations in apps/api/migrations/, each run once in a transaction and recorded in _migrations. drizzle-kit push is not used."
 ---
 
 Cue uses plain, hand-written SQL migration files instead of schema-push tooling. Each file is numbered, runs once inside its own transaction, and is recorded in a `_migrations` table so it is never applied twice. `apps/api/src/db/schema.ts` stays as the TypeScript source of truth for types and queries; migration files are how every schema change actually reaches the database.

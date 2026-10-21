@@ -160,6 +160,16 @@ The default is `common` — a planner is a personal tool even when the calendar 
 
 ## iCal URL and File Upload
 
+### Security: SSRF protection on iCal URLs
+
+When a user pastes an iCal URL, Cue fetches it with the server's own network credentials. To prevent the server from being used to reach internal infrastructure, every iCal URL is validated before the first fetch:
+
+- **`https:` is required.** Plain `http:` and `webcal:` URLs are rejected outright (`webcal:` is automatically upgraded to `https:` before validation).
+- **Private IP addresses are rejected.** The hostname is resolved, and if any resolved address falls in a private or loopback range — `10.x`, `172.16–31.x`, `192.168.x`, `127.x`, link-local, cloud metadata (`169.254.169.254`) — the URL is refused.
+- **Redirects are refused.** HTTP redirects are not followed during iCal fetches. A public URL that redirects to a private address would otherwise slip through after the initial check.
+
+These checks happen on every sync, not just on first save.
+
 ### Finding a Google Calendar secret address
 
 In Google Calendar, go to **Settings → Settings for my calendars → [your calendar] → Integrate calendar → Secret address in iCal format**. This URL gives read-only access to the calendar without requiring OAuth.

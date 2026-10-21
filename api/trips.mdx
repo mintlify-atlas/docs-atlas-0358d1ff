@@ -1,7 +1,7 @@
 ---
-title: "Trips API — Journey Containers and Travel Planning"
+title: "Trips API — Journey Containers and Travel Intentions"
 sidebarTitle: "Trips"
-description: "CRUD for trips — multi-day journey containers that surface saved intentions, assemble bookings, and trigger travel conflict checks when plans overlap."
+description: "Create trips as date-range containers for a destination. Saved intentions surface automatically when a trip is created; packing lists are built on demand."
 ---
 
 A trip is a period with a place attached — not a thing to do, but a context. "I am in Mathura from 12–14 October" changes what is feasible for three days, makes a pile of saved intentions suddenly relevant, and is the strongest indicator of a spoken-for day that Cue knows about. Trips are shown on calendar grids alongside commitments so the grid never lies about what a day holds.
@@ -72,7 +72,7 @@ Creates a new trip. The response includes any waiting intentions for the destina
 
 <ParamField body="strictness" type="string" default="flexible">
   How confirmed this trip is. Drives how loud a conflict with another plan sounds.
-  - `strict` → conflict is `impractical`
+  - `strict` → conflict is `impossible`
   - `flexible` → conflict is `tight`
   - `tentative` → conflict is `worth a look`
 </ParamField>
@@ -163,7 +163,10 @@ Returns all saved intentions (dateless wishes) for the authenticated user.
 
 <ResponseField name="id" type="string">UUID.</ResponseField>
 <ResponseField name="placeLabel" type="string | null">Destination; `null` for a wish with no place.</ResponseField>
+<ResponseField name="placeId" type="string | null">UUID of a linked saved place, if any.</ResponseField>
 <ResponseField name="title" type="string">What to do.</ResponseField>
+<ResponseField name="notes" type="string | null">Free-text notes.</ResponseField>
+<ResponseField name="preferredWindow" type="string | null">Preferred time of day when scheduled.</ResponseField>
 <ResponseField name="status" type="string">One of `saved`, `scheduled`, `done`, `dropped`.</ResponseField>
 <ResponseField name="priority" type="string">One of `critical`, `high`, `normal`, `low`, `nice_to_have`.</ResponseField>
 <ResponseField name="durationMinutes" type="number">Expected duration when scheduled.</ResponseField>

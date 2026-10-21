@@ -1,7 +1,7 @@
 ---
-title: "Contacts API — People, Roles, and Phone Numbers"
+title: "Contacts API — People, Phone Numbers, Keep-in-Touch"
 sidebarTitle: "Contacts"
-description: "CRUD for contacts — name, role, phone, email, notes, and associated place. Supports import from device via Contacts Picker API and disambiguation when names are ambiguous."
+description: "CRUD for contacts with name, role, phone, email, and linked place. Bulk-import from the device Contacts Picker API; set per-person keep-in-touch cadences."
 ---
 
 Contacts are the people you meet, call, and follow up with. Each contact can be linked to a saved place (their clinic, company, or office), given a role, a phone number, and an optional keep-in-touch cadence so Cue will prompt you when it has been too long. Deleting a contact never erases the visits or commitments that referenced them — the history of what happened stays intact with a null `contactId`.
@@ -52,6 +52,14 @@ Returns a single contact with their full history: visits, open commitments, and 
 <ResponseField name="commitments" type="object[]">
   Up to 50 non-deleted commitments linked to this contact, each with `id`, `title`, `dueAt`, `status`.
 </ResponseField>
+
+---
+
+### `GET /api/contacts/organizations`
+
+Returns the distinct list of organisation names used across all contacts and saved places for the current org. Used to populate the autocomplete when creating or editing a contact. Case-insensitive deduplication is applied — `"ABC Clinic"` and `"abc clinic"` appear only once.
+
+**Response** — sorted array of canonical organisation name strings (up to 300 entries).
 
 ---
 

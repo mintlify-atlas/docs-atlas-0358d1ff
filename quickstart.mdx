@@ -1,7 +1,7 @@
 ---
-title: "Get Started with Cue in Five Minutes"
+title: "Quickstart: Install and Run Cue Locally in Minutes"
 sidebarTitle: "Quickstart"
-description: "Install Cue locally with Node 22 and PostgreSQL, seed demo data, and open the PWA — no API keys required to run the core planner."
+description: "Install Cue locally with Node 22 and PostgreSQL, run migrations, seed the demo account, and verify push reminders — no third-party API keys required."
 ---
 
 Cue runs against your locally installed PostgreSQL — no Docker, no cloud account, no API keys for the core features. Follow the steps below and you will have the API, the PWA, and a seeded demo account running in about five minutes.
@@ -46,7 +46,7 @@ npm run db:setup
 ```
 
 <Note>
-  On non-Windows systems, the `db:setup` script runs a PowerShell helper (`scripts/setup-db.ps1`). If you are on Linux or macOS, you can create the role and database by hand instead:
+  `db:setup` invokes PowerShell (`scripts/setup-db.ps1`) and works on Windows only. On Linux or macOS, create the role and database by hand instead:
 
   ```bash
   sudo -u postgres psql \

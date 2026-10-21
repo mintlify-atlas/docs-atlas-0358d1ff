@@ -1,7 +1,7 @@
 ---
-title: "Recurring Plans — Rules Stored, Real Rows Written"
+title: "Recurring Plans: Rules Stored, Real Calendar Rows Written"
 sidebarTitle: "Recurring Plans"
-description: "Cue converts recurrence rules into real calendar rows in a rolling 120-day window — the reminder engine, conflict detection, and editing work with no changes."
+description: "Cue converts recurrence rules into real calendar rows in a 120-day window — the reminder engine, conflict detection, and editing all work unchanged."
 ---
 
 Say it once: `standup every tuesday at 10am`. From that point forward, Cue writes real commitment rows for every upcoming occurrence — the rule is stored, but the calendar fills with actual entries rather than virtual, expand-on-read placeholders. This design choice makes the rest of the app oblivious to recurrence entirely.
@@ -92,7 +92,7 @@ RFC 5545 says that a rule firing on the 31st simply skips February, April, June,
 
 Editing a single occurrence from a series marks that commitment row as `detached: true`. The regeneration sweep that runs after a series edit leaves detached rows completely alone.
 
-```
+```text
 series rule changes  →  future pending non-detached rows deleted  →  regenerated from new rule
                                                                     ↳  detached rows untouched
 ```

@@ -1,7 +1,7 @@
 ---
-title: "Quick Add API — Natural Language Plan Creation"
+title: "Quick Add API — Natural Language Capture in One Line"
 sidebarTitle: "Quick Add"
-description: "POST /api/quick parses a plain sentence into a structured plan, fills gaps from history, and saves it — returning every assumption made with its evidence."
+description: "POST /api/quick parses a sentence into a commitment, recurrence, trip, expense, or more. History fills the gaps; every assumption is returned as evidence."
 ---
 
 Quick Add collapses the entire capture flow into a single sentence. Type "dentist friday 6pm" and Cue parses the time, looks up your history for how long dentist appointments usually run and where the dentist is, saves the commitment, schedules the first reminder, and tells you exactly what it assumed. Nothing is hidden — every inference comes back as a plain-text `assumptions` string so you can correct it before or after saving.

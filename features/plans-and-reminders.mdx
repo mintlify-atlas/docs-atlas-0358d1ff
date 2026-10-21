@@ -1,5 +1,5 @@
 ---
-title: "Plans, Reminders, and the Escalation Engine"
+title: "Plans, Reminders, and Cue's Reminder Escalation Engine"
 sidebarTitle: "Plans & Reminders"
 description: "Every Cue plan queues a reminder chain that escalates until marked done, snoozed, or consciously cancelled — nothing is silently dropped."
 ---
@@ -86,7 +86,7 @@ pending → deleted   ("let go" — off the list but row survives)
 
 Marking a plan **done** or **cancelled** immediately cancels all pending reminder rows for that commitment. No further pushes will arrive.
 
-**Snoozing** cancels the current chain and starts a fresh one from the new time. The `escalation_count` does not reset — a snooze is not a new plan, it is a deferral.
+**Snoozing** cancels the current chain, resets `escalation_count` to 0, and starts a fresh chain from the new time. The escalation counter resets because the item is being given a genuinely new due time — it is not late for a time it just moved away from.
 
 ### Editing a commitment's time
 

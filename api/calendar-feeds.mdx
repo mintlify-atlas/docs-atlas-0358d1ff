@@ -1,7 +1,7 @@
 ---
-title: "Calendar Feeds API — Connect and Sync External Calendars"
+title: "Calendar Feeds API — iCal Subscriptions and File Import"
 sidebarTitle: "Calendar Feeds"
-description: "Add Google, Microsoft, iCal URL, or .ics file calendar sources. Feeds sync every 30 minutes and deduplicate by event UID — Cue never writes back."
+description: "Mirror events into Cue from any iCal URL or .ics file upload. URLs are encrypted at rest; feeds auto-sync every 30 minutes and deduplicate events by UID."
 ---
 
 Calendar feeds let you mirror events from external calendars into Cue. Cue is strictly read-only: it never writes back to the source calendar. Feeds sync automatically every 30 minutes and deduplicate by event UID, so re-syncing a feed is safe to do at any time. Events mirrored from a feed appear in all agenda and calendar views and can generate reminders (unless you disable them for that feed).
@@ -16,8 +16,8 @@ Calendar feeds let you mirror events from external calendars into Cue. Cue is st
 |---|---|---|
 | `url` (iCal) | Yes, every 30 min | Any public or secret iCal URL |
 | `file` (.ics) | No — re-upload only | Re-uploading updates in place; deduplication is by event UID |
-| Google Calendar | Yes, via OAuth | Start with `GET /api/oauth/google/start` |
-| Microsoft 365 | Yes, via OAuth | Start with `GET /api/oauth/microsoft/start` |
+| Google Calendar | Yes, via OAuth | Start with `POST /api/oauth/google/connect` |
+| Microsoft 365 | Yes, via OAuth | Start with `POST /api/oauth/microsoft/connect` |
 
 ## Endpoints
 
@@ -199,9 +199,9 @@ Disconnects the calendar and removes all mirrored events. Mirrored events only e
 
 For Google and Microsoft calendars, start an OAuth round trip to obtain tokens before adding feeds.
 
-### `GET /api/oauth/:provider/start`
+### `POST /api/oauth/:provider/connect`
 
-Begins the OAuth flow. The browser should navigate to this URL (not fetch it as JSON).
+Begins the OAuth flow. Requires authentication. Returns the provider's consent screen URL for the browser to navigate to.
 
 **Path parameter**
 
@@ -209,8 +209,8 @@ Begins the OAuth flow. The browser should navigate to this URL (not fetch it as 
   One of `google`, `microsoft`.
 </ParamField>
 
-The server creates a short-lived `oauthStates` record, then redirects the browser to the provider's consent screen. On completion the provider redirects back to the callback URL, tokens are stored encrypted, and the calendar list for the account is returned for the user to choose from.
+The server creates a short-lived `oauthStates` record, then returns the URL of the provider's consent screen. On completion the provider redirects back to `GET /api/oauth/:provider/callback`, tokens are stored encrypted, and the calendar list for the account is returned for the user to choose from.
 
 <Tip>
-  After OAuth completes, use `POST /api/calendar-feeds` with the chosen calendar's iCal URL, or the provider-specific feed creation flow (returned from the OAuth callback as available calendars).
+  After OAuth completes, use `GET /api/oauth/accounts/:id/calendars` to list available calendars, then `POST /api/oauth/accounts/:id/calendars` to subscribe to specific ones.
 </Tip>

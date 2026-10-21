@@ -1,7 +1,7 @@
 ---
-title: "Commitments API — Plans, Follow-Ups, and Reminders"
+title: "Commitments API — Plans, Clash Detection, Reminders"
 sidebarTitle: "Commitments"
-description: "CRUD for commitments — plans with due times, durations, statuses, and reminder chains. Includes clash detection, reschedule, and the range endpoint for calendar grids."
+description: "CRUD for commitments with due times and reminder chains. Covers agenda buckets, calendar range, clash detection, reschedule, snooze, and meeting wrap-up."
 ---
 
 Commitments are the core record in Cue — the thing you promised to do next. Each commitment has a due time, a duration, and a status that moves through `pending` → `done` / `cancelled` / `deleted`. The reminder engine works directly against these rows, firing a chain of notifications at `dueAt` and escalating until the item is closed. Every write re-runs clash detection so that two fixed items can never claim the same slot.
@@ -297,6 +297,81 @@ Pushes the commitment forward from now. Resets `escalationCount` to zero — the
 
 ---
 
+### `POST /api/commitments/suggest-slots`
+
+Suggests free time slots for a flexible item on a given day and window. Used by the capture screen to offer concrete times rather than leaving a vague "sometime this afternoon".
+
+**Request body**
+
+<ParamField body="day" type="string" required>ISO 8601 datetime — the day to search.</ParamField>
+<ParamField body="window" type="string" required>One of `morning`, `afternoon`, `evening`, `night`.</ParamField>
+<ParamField body="durationMinutes" type="number" default="15">Duration to fit. 5–480 minutes.</ParamField>
+
+**Response**
+
+```json
+{ "slots": ["2026-10-15T14:00:00.000Z", "2026-10-15T15:30:00.000Z"] }
+```
+
+---
+
+### `GET /api/commitments/:id/slots`
+
+Finds free time slots suitable for rescheduling a specific commitment. The commitment being moved is excluded from busy-time calculations so its own old slot does not block the best answer.
+
+**Response**
+
+<ResponseField name="slots" type="string[]">ISO 8601 datetimes — up to 3 free slots in the preferred window, or outside it if none exist there.</ResponseField>
+<ResponseField name="durationMinutes" type="number">Duration of the commitment.</ResponseField>
+<ResponseField name="preferredWindow" type="string | null">Window the commitment asked for, if any.</ResponseField>
+<ResponseField name="outsideWindow" type="boolean">`true` when returned slots are outside the preferred window because none were found inside it.</ResponseField>
+
+---
+
+### `GET /api/commitments/:id/prep`
+
+Returns meeting prep: the most recent related meeting (same contact or place), all open follow-ups from earlier meetings, and what from the last meeting has been done since.
+
+**Response**
+
+<ResponseField name="last" type="object | null">The most recent related meeting with `id`, `title`, `dueAt`.</ResponseField>
+<ResponseField name="earlierCount" type="number">Total number of related past meetings found.</ResponseField>
+<ResponseField name="open" type="CommitmentDTO[]">Pending follow-ups created from earlier related meetings.</ResponseField>
+<ResponseField name="doneSinceLast" type="CommitmentDTO[]">Follow-ups from the last meeting that have been completed.</ResponseField>
+
+---
+
+### `POST /api/commitments/:id/wrap-up`
+
+Closes a meeting and converts follow-up items into new commitments. An empty `items` list means "nothing came out of it" and marks the meeting done.
+
+**Request body**
+
+<ParamField body="items" type="object[]" required>
+  Up to 20 follow-up items.
+
+  <Expandable title="item fields">
+    <ParamField body="items[].title" type="string" required>What was decided. 1–300 characters.</ParamField>
+    <ParamField body="items[].dueAt" type="string" required>ISO 8601 datetime — when to follow up.</ParamField>
+    <ParamField body="items[].waitingOn" type="string">If this is someone else's to-do: their name. Up to 100 characters.</ParamField>
+  </Expandable>
+</ParamField>
+
+**Response** — the result of the wrap-up service (created commitment IDs and updated meeting status).
+
+---
+
+### `GET /api/commitments/queue`
+
+Diagnostic endpoint: how many reminders are queued and when the next one fires. Useful for debugging notification delivery.
+
+**Response**
+
+<ResponseField name="pending" type="number">Count of pending reminders in the queue.</ResponseField>
+<ResponseField name="nextFireAt" type="string | null">ISO 8601 — when the next reminder is scheduled to fire. `null` if the queue is empty.</ResponseField>
+
+---
+
 ### `POST /api/commitments/check-conflicts`
 
 Pre-flight clash check, called as soon as a time is picked so a clash is shown before the user hits save.
@@ -324,6 +399,45 @@ Pre-flight clash check, called as soon as a time is picked so a clash is shown b
 <ResponseField name="locationConflicts" type="LocationConflictDTO[]">
   Where-based problems: a trip to another city, or not enough travel time between two places.
 </ResponseField>
+
+---
+
+---
+
+## People and Account Views
+
+These endpoints are registered alongside the commitments routes and use the same `CommitmentDTO` shape to return related plans.
+
+### `GET /api/people/summary`
+
+Returns every person who appears in open commitments, grouped by name, plus the list of waitingOn names that have not yet been linked to a real contact record.
+
+---
+
+### `GET /api/people/keep-in-touch`
+
+Returns everyone you mean to keep in touch with, sorted by longest overdue first.
+
+**Response**
+
+<ResponseField name="due" type="number">Count of people whose keep-in-touch cadence is overdue.</ResponseField>
+<ResponseField name="people" type="object[]">Full list with `id`, `name`, `cadenceDays`, `lastTouch`, `dueAt`, `due`, and `snoozedUntil`.</ResponseField>
+
+---
+
+### `GET /api/people/:id/overview`
+
+Returns a single contact's full relationship view: waiting-on items, things you owe them, upcoming and last meetings, last meeting follow-ups, keep-in-touch status, recent calls, and colleagues at the same workplace.
+
+---
+
+### `GET /api/accounts/overview`
+
+Returns a company or clinic overview, matched by name. Includes stage (sales pipeline), contacts at that account, open waiting items, upcoming and past meetings.
+
+**Query parameters**
+
+<ParamField query="name" type="string" required>The account (company or clinic) name. 1–200 characters.</ParamField>
 
 ---
 

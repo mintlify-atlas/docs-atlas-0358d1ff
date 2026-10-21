@@ -21,7 +21,7 @@ The rule-based parsers return `null` on anything they do not recognise rather th
 
 ## When AI is used
 
-AI is only invoked for one specific case: **text longer than 25 characters that the parsers cannot confidently read**.
+AI is only invoked when the rule-based parsers return an **uncertain reading** — either the parser cannot place what the line is for, or a Hindi/Hinglish word is left unread in the title after the time has been extracted.
 
 `dentist friday 6pm` never touches a model. A multi-event paragraph like:
 

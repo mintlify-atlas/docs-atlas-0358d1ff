@@ -1,5 +1,5 @@
 ---
-title: "Cue Architecture: Monorepo, API, PWA, and Workers"
+title: "Cue System Architecture: Monorepo, API, PWA, Workers"
 sidebarTitle: "Architecture"
 description: "Cue is a Node.js monorepo — Fastify 5 API with Drizzle ORM, a React 18 PWA, shared Zod schemas, and a suite of background workers all in one process."
 ---
@@ -50,13 +50,13 @@ All workers are started from `apps/api/src/index.ts` and run inside the API proc
 | **Follow-ups** | 2 min | Asks "anything to follow up?" shortly after a one-off meeting ends (`services/wrapUp.ts`) |
 | **Meeting prep** | 2 min | 15 minutes before a meeting, surfaces what is still open from last time (`services/meetingPrep.ts`) |
 | **Weekly review** | 10 min | Friday at `weeklyReviewHour` (default 5 PM local): done, slipped, waiting, next week, targets (`services/weeklyReview.ts`) |
-| **Exam week** | — | Sunday evening summary for anyone tracking a government exam (`services/examWeek.ts`) |
+| **Exam week** | 10 min | Sunday evening summary for anyone tracking a government exam (`services/examWeek.ts`) |
 | **Focus** | 2 min | Closes finished focus blocks; no push, just status update (`services/focus.ts`) |
 | **Daily report** | 5 min | Opt-in, at `reportHour` (default 6 PM local): "your report is ready" (`services/dailyReport.ts`) |
 | **Bills** | 15 min | Reminder days before, on the day, and the day after; fires between 9 AM and 9 PM local (`services/bills.ts`) |
 | **Deliveries** | 15 min | "Arriving today" with cash-on-delivery amount (`services/deliveries.ts`) |
 | **Mail reader** | 15 min | Reads connected Gmail/Outlook mailboxes for tickets, bills, parcels, insurance, PUC, FASTag, challans (`services/mailReader.ts`) |
-| **Notice watch** | — | Polls exam boards' public pages for new result and form notices (`services/noticeWatch.ts`) |
+| **Notice watch** | 12 h | Polls exam boards' public pages for new result and form notices (`services/noticeWatch.ts`) |
 | **Demo cleanup** | 1 h | Deletes demo orgs older than 24 hours (`services/demo.ts`) |
 
 ### Recurrence Sweep
